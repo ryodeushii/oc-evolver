@@ -60,8 +60,12 @@ describe("plugin tool surface", () => {
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
       "evolver_apply_memory",
       "evolver_apply_skill",
+      "evolver_check",
+      "evolver_promote",
+      "evolver_reject",
       "evolver_rollback",
       "evolver_run_agent",
+      "evolver_run_command",
       "evolver_status",
       "evolver_validate",
       "evolver_write_agent",
@@ -308,6 +312,7 @@ describe("plugin tool surface", () => {
       memories: {},
       quarantine: {},
       currentRevision: null,
+      pendingRevision: null,
     })
   })
 
@@ -576,6 +581,116 @@ describe("plugin tool surface", () => {
     expect(secondRun.exitCode).toBe(1)
     expect(secondRun.stderr).toContain("artifact-only forbids Basic Memory writes")
     expect(secondRun.stdout).not.toContain("allowed")
+  })
+
+  test("enforces agent permission metadata for continued session actions", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_agent?.execute(
+      {
+        agentName: "restricted-reviewer",
+        document: `---
+description: Review without mutating files
+mode: subagent
+permission:
+  edit: deny
+---
+
+Review only.
+`,
+      },
+      {
+        sessionID: "session-restricted-agent",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_run_agent?.execute(
+      {
+        agentName: "restricted-reviewer",
+        prompt: "Review README.md.",
+      },
+      {
+        sessionID: "session-restricted-agent",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    const permissionOutput: { status: "ask" | "deny" | "allow" } = {
+      status: "ask",
+    }
+
+    await hooks["permission.ask"]?.(
+      {
+        id: "perm-agent-1",
+        type: "edit",
+        pattern: ".opencode/commands/review.md",
+        sessionID: "session-restricted-agent",
+        messageID: "message-3",
+        title: "Edit file while restricted",
+        metadata: {},
+        time: {
+          created: Date.now(),
+        },
+      },
+      permissionOutput,
+    )
+
+    expect(permissionOutput.status).toBe("deny")
+
+    await expect(
+      hooks["tool.execute.before"]?.(
+        {
+          tool: "apply_patch",
+          sessionID: "session-restricted-agent",
+          callID: "call-agent-1",
+        },
+        {
+          args: {
+            patchText: [
+              "*** Begin Patch",
+              "*** Update File: .opencode/commands/review.md",
+              "@@",
+              "+restricted edit",
+              "*** End Patch",
+            ].join("\n"),
+          },
+        },
+      ),
+    ).rejects.toThrow(/restricted-reviewer.*edit.*deny/i)
   })
 
   test("does not re-inject the operator guide when a continued session resumes in a fresh process", async () => {

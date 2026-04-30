@@ -22,6 +22,8 @@ The runner currently executes these default scenarios:
 - `artifact-only-deny`
 - `rollback`
 
+Pending revision lifecycle matters during evaluation: `evolver_write_*` tools stage a pending revision, while `evolver_promote` and `evolver_reject` decide whether that revision becomes the accepted registry state. `evolver_check` is the plugin-native health check for invalid artifacts plus pending revision state.
+
 ## Result artifacts
 
 Each scenario writes artifacts under `eval/results/<scenario>/<timestamp>/`.
@@ -111,11 +113,13 @@ Key files:
 
 ### `rollback`
 
-- Creates one mutable command revision, overwrites it, then rolls the latest revision back
+- Creates one mutable command revision, promotes it, overwrites it, promotes the replacement, then rolls the latest accepted revision back
 - Expected artifact signal:
   - `.opencode/commands/review-markdown.md` restored to the first command body
+  - `audit.ndjson` contains two `promote` events before `rollback`
   - `audit.ndjson` contains `rollback` with both the restored and rolled-back revision ids
   - `registry.json.currentRevision` points at the restored revision
+  - `registry.json.pendingRevision` is `null`
 
 ## Failure inspection
 
@@ -142,40 +146,39 @@ This section is updated from the latest full sweep artifacts.
 | Check | Command | Status | Notes |
 | --- | --- | --- | --- |
 | TypeScript | `bun run typecheck` | PASS | Fresh clean `tsc --noEmit` run on current HEAD |
-| Unit tests | `bun run test:unit` | PASS | `62 pass`, `0 fail`, `188 expect()` |
-| Smoke eval | `bun run eval:smoke` | PASS | Latest artifact: `eval/results/smoke/2026-04-30T13-55-31.594Z/` |
-| Full eval suite | `bun run eval:all` | PASS | Latest scenario artifacts listed below |
+| Unit tests | `bun run test:unit` | PASS | `70 pass`, `0 fail`, `225 expect()` |
+| Smoke eval | `bun run scripts/run-eval.ts smoke` | PASS | Latest artifact: `eval/results/smoke/2026-04-30T15-43-54.231Z/` |
+| Full eval suite | Default scenario sweep | PASS | All default scenarios re-ran successfully; latest artifacts listed below |
 
 ## Latest full-sweep artifacts
 
-- `smoke`: `eval/results/smoke/2026-04-30T13-55-31.594Z/`
+- `smoke`: `eval/results/smoke/2026-04-30T15-43-54.231Z/`
   - `exitCode: 0`
-  - `changedFiles: []`
-- `create-skill`: `eval/results/create-skill/2026-04-30T13-55-46.389Z/`
+  - `changedFiles: 2`
+- `create-skill`: `eval/results/create-skill/2026-04-30T15-43-54.286Z/`
   - `exitCode: 0`
-  - changed files include the canonical skill bundle helper path, registry, audit, and a revision snapshot
-- `create-agent`: `eval/results/create-agent/2026-04-30T13-56-33.234Z/`
+  - `changedFiles: 5`
+- `create-agent`: `eval/results/create-agent/2026-04-30T15-43-54.646Z/`
   - `exitCode: 0`
-  - changed files include `.opencode/agent/fixture-reviewer.md`, registry, audit, and a revision snapshot
-- `reuse-skill`: `eval/results/reuse-skill/2026-04-30T13-58-28.857Z/`
+  - `changedFiles: 4`
+- `reuse-skill`: `eval/results/reuse-skill/2026-04-30T15-45-00.310Z/`
   - `exitCode: 0`
   - `turnCount: 4`
-  - changed files include the skill bundle, agent, registry, audit, a persisted session state file, revision snapshots, and `README.md`
-- `policy-deny`: `eval/results/policy-deny/2026-04-30T13-59-37.069Z/`
+  - `changedFiles: 9`
+- `policy-deny`: `eval/results/policy-deny/2026-04-30T15-45-00.356Z/`
   - `exitCode: 0`
-  - changed files include only `.opencode/oc-evolver/audit.ndjson`
-- `invalid-artifact`: `eval/results/invalid-artifact/2026-04-30T13-59-59.999Z/`
+  - `changedFiles: 1`
+- `invalid-artifact`: `eval/results/invalid-artifact/2026-04-30T15-45-00.454Z/`
   - `exitCode: 0`
-  - changed files include audit, registry, and the seeded invalid skill bundle
-- `memory-guided-write`: `eval/results/memory-guided-write/2026-04-30T14-00-17.522Z/`
+  - `changedFiles: 3`
+- `memory-guided-write`: `eval/results/memory-guided-write/2026-04-30T15-46-10.252Z/`
   - `exitCode: 0`
-  - changed files include `.opencode/memory/research-routing.md`, registry, audit, and a revision snapshot
-- `artifact-only-deny`: `eval/results/artifact-only-deny/2026-04-30T14-00-44.599Z/`
+  - `changedFiles: 4`
+- `artifact-only-deny`: `eval/results/artifact-only-deny/2026-04-30T15-46-10.316Z/`
   - `exitCode: 0`
   - `turnCount: 2`
-  - changed files include the memory profile, registry, audit, a revision snapshot, and a persisted session state file
-  - audit includes `write_memory`, `apply_memory`, and `policy_denied`
-- `rollback`: `eval/results/rollback/2026-04-30T14-01-35.230Z/`
+  - `changedFiles: 5`
+- `rollback`: `eval/results/rollback/2026-04-30T15-46-10.387Z/`
   - `exitCode: 0`
   - `turnCount: 3`
-  - changed files include `.opencode/commands/review-markdown.md`, registry, audit, and two revision snapshots
+  - `changedFiles: 5`

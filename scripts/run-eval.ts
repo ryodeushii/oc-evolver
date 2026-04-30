@@ -438,6 +438,14 @@ async function assertScenarioArtifacts(input: {
       return
     }
     case "rollback": {
+      const promoteEvents = auditEvents.filter(
+        (event) => event.action === "promote" && event.status === "success",
+      )
+
+      if (promoteEvents.length < 2) {
+        throw new Error("scenario rollback missing promote audit events for accepted revisions")
+      }
+
       assertAuditAction(auditEvents, "rollback", "scenario rollback missing rollback audit event")
       const commandDocument = await readFile(
         join(input.workspaceRoot, ".opencode/commands/review-markdown.md"),
@@ -459,6 +467,10 @@ async function assertScenarioArtifacts(input: {
 
       if (registry.currentRevision !== rollbackEvent.revisionID) {
         throw new Error("scenario rollback registry currentRevision did not point at the restored revision")
+      }
+
+      if (registry.pendingRevision !== null) {
+        throw new Error("scenario rollback left a pending revision behind")
       }
 
       return
@@ -489,6 +501,7 @@ async function readRegistry(workspaceRoot: string) {
     skills?: Record<string, { helperPaths?: string[] }>
     memories?: Record<string, unknown>
     currentRevision?: string | null
+    pendingRevision?: string | null
   }
 }
 

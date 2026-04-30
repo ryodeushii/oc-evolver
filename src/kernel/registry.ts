@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
-import { dirname, join, relative } from "node:path"
+import { dirname, join, relative, resolve } from "node:path"
 
 import { appendAuditEvent } from "./audit.ts"
 import {
@@ -67,6 +67,7 @@ export type OCEvolverRegistry = {
   memories: Record<string, MemoryRegistryEntry>
   quarantine: Record<string, QuarantineEntry>
   currentRevision: string | null
+  pendingRevision: string | null
 }
 
 type SkillRevisionEntry = {
@@ -90,8 +91,8 @@ type RevisionEntries = {
 type RevisionRecord = {
   revisionID: string
   previousRevisionID: string | null
+  previousAcceptedRevisionID: string | null
   createdAt: string
-  registry: OCEvolverRegistry
   entries: RevisionEntries
 }
 
@@ -204,6 +205,12 @@ export async function validateRegistryArtifacts(
     validateDocument: parseMemoryDocument,
     invalid,
   })
+  await collectRegistryIntegrityFindings({
+    pluginFilePath,
+    runtimeContract,
+    registry,
+    invalid,
+  })
 
   const nextRegistry = normalizeRegistry({
     ...registry,
@@ -260,8 +267,9 @@ export async function applyMutationTransaction(input: {
 }) {
   const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
   const currentRegistry = await loadRegistry(input.pluginFilePath, input.runtimeContract)
-  const previousRevision = currentRegistry.currentRevision
-    ? await loadRevision(input.pluginFilePath, input.runtimeContract, currentRegistry.currentRevision)
+  const previousRevisionID = currentRegistry.pendingRevision ?? currentRegistry.currentRevision
+  const previousRevision = previousRevisionID
+    ? await loadRevision(input.pluginFilePath, input.runtimeContract, previousRevisionID)
     : null
   const nextEntries = cloneRevisionEntries(previousRevision?.entries ?? emptyRevisionEntries())
   const revisionID = randomUUID()
@@ -274,37 +282,25 @@ export async function applyMutationTransaction(input: {
     entries: nextEntries,
   })
 
-  const nextRegistry: OCEvolverRegistry = {
-    ...currentRegistry,
-    currentRevision: revisionID,
-    skills: { ...currentRegistry.skills },
-    agents: { ...currentRegistry.agents },
-    commands: { ...currentRegistry.commands },
-    memories: { ...currentRegistry.memories },
-    quarantine: { ...currentRegistry.quarantine },
-  }
-
-  if (mutationState.registryEntry.kind === "skill") {
-    nextRegistry.skills[mutationState.registryEntry.name] = mutationState.registryEntry
-  }
-
-  if (mutationState.registryEntry.kind === "agent") {
-    nextRegistry.agents[mutationState.registryEntry.name] = mutationState.registryEntry
-  }
-
-  if (mutationState.registryEntry.kind === "command") {
-    nextRegistry.commands[mutationState.registryEntry.name] = mutationState.registryEntry
-  }
-
-  if (mutationState.registryEntry.kind === "memory") {
-    nextRegistry.memories[mutationState.registryEntry.name] = mutationState.registryEntry
-  }
+  const nextRegistry = buildRegistryWithEntries({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    registry: {
+      ...currentRegistry,
+      currentRevision: currentRegistry.currentRevision,
+      pendingRevision: revisionID,
+    },
+    revisionID,
+    entries: nextEntries,
+  })
 
   const revisionRecord: RevisionRecord = {
     revisionID,
-    previousRevisionID: currentRegistry.currentRevision,
+    previousRevisionID,
+    previousAcceptedRevisionID: currentRegistry.pendingRevision
+      ? previousRevision?.previousAcceptedRevisionID ?? currentRegistry.currentRevision
+      : currentRegistry.currentRevision,
     createdAt: new Date().toISOString(),
-    registry: nextRegistry,
     entries: nextEntries,
   }
 
@@ -324,7 +320,7 @@ export async function applyMutationTransaction(input: {
       status: "success",
       revisionID,
       target: mutationState.auditTarget,
-      detail: "validated and materialized",
+      detail: "validated and materialized as pending revision",
     },
   })
 
@@ -334,11 +330,123 @@ export async function applyMutationTransaction(input: {
   }
 }
 
+export async function promotePendingRevision(
+  pluginFilePath: string,
+  runtimeContract: OCEvolverRuntimeContract,
+) {
+  const registry = await loadRegistry(pluginFilePath, runtimeContract)
+
+  if (!registry.pendingRevision) {
+    throw new Error("cannot promote without a pending revision")
+  }
+
+  const pendingRevision = await loadRevision(pluginFilePath, runtimeContract, registry.pendingRevision)
+  const nextRegistry = buildRegistryWithEntries({
+    pluginFilePath,
+    runtimeContract,
+    registry: {
+      ...registry,
+      currentRevision: pendingRevision.revisionID,
+      pendingRevision: null,
+    },
+    revisionID: pendingRevision.revisionID,
+    entries: pendingRevision.entries,
+  })
+
+  await saveRegistry(pluginFilePath, runtimeContract, nextRegistry)
+  await appendAuditEvent({
+    pluginFilePath,
+    runtimeContract,
+    event: {
+      action: "promote",
+      status: "success",
+      revisionID: pendingRevision.revisionID,
+      target: ".opencode/oc-evolver/registry.json",
+      detail: "promoted pending revision",
+    },
+  })
+
+  return {
+    currentRevisionID: pendingRevision.revisionID,
+    pendingRevisionID: null,
+  }
+}
+
+export async function rejectPendingRevision(
+  pluginFilePath: string,
+  runtimeContract: OCEvolverRuntimeContract,
+) {
+  const registry = await loadRegistry(pluginFilePath, runtimeContract)
+
+  if (!registry.pendingRevision) {
+    throw new Error("cannot reject without a pending revision")
+  }
+
+  const rejectedRevisionID = registry.pendingRevision
+  const restoredRevision = registry.currentRevision
+    ? await loadRevision(pluginFilePath, runtimeContract, registry.currentRevision)
+    : null
+  const restoredEntries = restoredRevision?.entries ?? emptyRevisionEntries()
+
+  await syncRegistryArtifacts({
+    pluginFilePath,
+    runtimeContract,
+    currentRegistry: registry,
+    nextEntries: restoredEntries,
+  })
+
+  const nextRegistry = restoredRevision
+    ? buildRegistryWithEntries({
+        pluginFilePath,
+        runtimeContract,
+        registry: {
+          ...registry,
+          currentRevision: restoredRevision.revisionID,
+          pendingRevision: null,
+        },
+        revisionID: restoredRevision.revisionID,
+        entries: restoredEntries,
+      })
+    : normalizeRegistry({
+        ...registry,
+        skills: {},
+        agents: {},
+        commands: {},
+        memories: {},
+        currentRevision: null,
+        pendingRevision: null,
+      })
+
+  await saveRegistry(pluginFilePath, runtimeContract, nextRegistry)
+  await appendAuditEvent({
+    pluginFilePath,
+    runtimeContract,
+    event: {
+      action: "reject",
+      status: "success",
+      revisionID: rejectedRevisionID,
+      target: ".opencode/oc-evolver/registry.json",
+      detail: restoredRevision
+        ? `rejected pending revision and restored accepted revision ${restoredRevision.revisionID}`
+        : "rejected pending revision and restored empty registry state",
+    },
+  })
+
+  return {
+    rejectedRevisionID,
+    restoredRevisionID: restoredRevision?.revisionID ?? null,
+  }
+}
+
 export async function rollbackLatestRevision(
   pluginFilePath: string,
   runtimeContract: OCEvolverRuntimeContract,
 ) {
   const registry = await loadRegistry(pluginFilePath, runtimeContract)
+
+  if (registry.pendingRevision) {
+    throw new Error("cannot rollback while a pending revision exists")
+  }
 
   if (!registry.currentRevision) {
     throw new Error("cannot rollback without an accepted revision")
@@ -346,22 +454,36 @@ export async function rollbackLatestRevision(
 
   const currentRevision = await loadRevision(pluginFilePath, runtimeContract, registry.currentRevision)
 
-  if (!currentRevision.previousRevisionID) {
+  if (!currentRevision.previousAcceptedRevisionID) {
     throw new Error("cannot rollback the initial accepted revision")
   }
 
   const previousRevision = await loadRevision(
     pluginFilePath,
     runtimeContract,
-    currentRevision.previousRevisionID,
+    currentRevision.previousAcceptedRevisionID,
   )
 
-  await materializeRevisionEntries({
+  await syncRegistryArtifacts({
     pluginFilePath,
     runtimeContract,
+    currentRegistry: registry,
+    nextEntries: previousRevision.entries,
+  })
+
+  const nextRegistry = buildRegistryWithEntries({
+    pluginFilePath,
+    runtimeContract,
+    registry: {
+      ...registry,
+      currentRevision: previousRevision.revisionID,
+      pendingRevision: null,
+    },
+    revisionID: previousRevision.revisionID,
     entries: previousRevision.entries,
   })
-  await saveRegistry(pluginFilePath, runtimeContract, previousRevision.registry)
+
+  await saveRegistry(pluginFilePath, runtimeContract, nextRegistry)
   await appendAuditEvent({
     pluginFilePath,
     runtimeContract,
@@ -584,6 +706,147 @@ async function materializeRevisionEntries(input: {
   }
 }
 
+async function syncRegistryArtifacts(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  currentRegistry: OCEvolverRegistry
+  nextEntries: RevisionEntries
+}) {
+  await removeRegistryArtifacts({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    registry: input.currentRegistry,
+  })
+  await materializeRevisionEntries({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    entries: input.nextEntries,
+  })
+}
+
+async function removeRegistryArtifacts(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  registry: OCEvolverRegistry
+}) {
+  const skillRoots = new Set(
+    Object.values(input.registry.skills).map((entry) =>
+      dirname(resolveWorkspaceRelativePath(input.pluginFilePath, input.runtimeContract, entry.nativePath)),
+    ),
+  )
+
+  for (const skillRoot of skillRoots) {
+    await rm(skillRoot, { recursive: true, force: true })
+  }
+
+  for (const entry of Object.values(input.registry.agents)) {
+    await rm(resolveWorkspaceRelativePath(input.pluginFilePath, input.runtimeContract, entry.nativePath), {
+      force: true,
+    })
+  }
+
+  for (const entry of Object.values(input.registry.commands)) {
+    await rm(resolveWorkspaceRelativePath(input.pluginFilePath, input.runtimeContract, entry.nativePath), {
+      force: true,
+    })
+  }
+
+  for (const entry of Object.values(input.registry.memories)) {
+    await rm(resolveWorkspaceRelativePath(input.pluginFilePath, input.runtimeContract, entry.nativePath), {
+      force: true,
+    })
+  }
+}
+
+function buildRegistryWithEntries(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  registry: OCEvolverRegistry
+  revisionID: string
+  entries: RevisionEntries
+}): OCEvolverRegistry {
+  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
+
+  return normalizeRegistry({
+    ...input.registry,
+    skills: Object.fromEntries(
+      Object.entries(input.entries.skills).map(([name, skill]) => {
+        const skillRoot = join(kernelPaths.skillsRoot, name)
+
+        return [
+          name,
+          {
+            kind: "skill" as const,
+            name,
+            nativePath: toWorkspaceRelativePath(
+              input.pluginFilePath,
+              input.runtimeContract,
+              join(skillRoot, "SKILL.md"),
+            ),
+            helperPaths: skill.helperFiles.map((helperFile) =>
+              toWorkspaceRelativePath(
+                input.pluginFilePath,
+                input.runtimeContract,
+                join(skillRoot, helperFile.relativePath),
+              ),
+            ),
+            revisionID: input.revisionID,
+            contentHash: skill.contentHash,
+          },
+        ]
+      }),
+    ),
+    agents: Object.fromEntries(
+      Object.entries(input.entries.agents).map(([name, agent]) => [
+        name,
+        {
+          kind: "agent" as const,
+          name,
+          nativePath: toWorkspaceRelativePath(
+            input.pluginFilePath,
+            input.runtimeContract,
+            join(kernelPaths.agentsRoot, `${name}.md`),
+          ),
+          revisionID: input.revisionID,
+          contentHash: agent.contentHash,
+        },
+      ]),
+    ),
+    commands: Object.fromEntries(
+      Object.entries(input.entries.commands).map(([name, command]) => [
+        name,
+        {
+          kind: "command" as const,
+          name,
+          nativePath: toWorkspaceRelativePath(
+            input.pluginFilePath,
+            input.runtimeContract,
+            join(kernelPaths.commandsRoot, `${name}.md`),
+          ),
+          revisionID: input.revisionID,
+          contentHash: command.contentHash,
+        },
+      ]),
+    ),
+    memories: Object.fromEntries(
+      Object.entries(input.entries.memories).map(([name, memory]) => [
+        name,
+        {
+          kind: "memory" as const,
+          name,
+          nativePath: toWorkspaceRelativePath(
+            input.pluginFilePath,
+            input.runtimeContract,
+            join(kernelPaths.memoriesRoot, `${name}.md`),
+          ),
+          revisionID: input.revisionID,
+          contentHash: memory.contentHash,
+        },
+      ]),
+    ),
+  })
+}
+
 async function loadRevision(
   pluginFilePath: string,
   runtimeContract: OCEvolverRuntimeContract,
@@ -592,11 +855,14 @@ async function loadRevision(
   const kernelPaths = resolveKernelPaths(pluginFilePath, runtimeContract)
   const revisionPath = join(kernelPaths.registryRoot, "revisions", `${revisionID}.json`)
 
-  const revision = JSON.parse(await readFile(revisionPath, "utf8")) as RevisionRecord
+  const revision = JSON.parse(await readFile(revisionPath, "utf8")) as Partial<RevisionRecord>
 
   return {
-    ...revision,
-    registry: normalizeRegistry(revision.registry),
+    revisionID: revision.revisionID ?? revisionID,
+    previousRevisionID: revision.previousRevisionID ?? null,
+    previousAcceptedRevisionID: revision.previousAcceptedRevisionID ?? revision.previousRevisionID ?? null,
+    createdAt: revision.createdAt ?? new Date(0).toISOString(),
+    entries: normalizeRevisionEntries(revision.entries),
   }
 }
 
@@ -627,6 +893,7 @@ function emptyRegistry(): OCEvolverRegistry {
     memories: {},
     quarantine: {},
     currentRevision: null,
+    pendingRevision: null,
   }
 }
 
@@ -638,6 +905,7 @@ function normalizeRegistry(rawRegistry: Partial<OCEvolverRegistry>): OCEvolverRe
     memories: rawRegistry.memories ?? {},
     quarantine: rawRegistry.quarantine ?? {},
     currentRevision: rawRegistry.currentRevision ?? null,
+    pendingRevision: rawRegistry.pendingRevision ?? null,
   }
 }
 
@@ -656,6 +924,15 @@ function cloneRevisionEntries(entries: RevisionEntries): RevisionEntries {
     agents: structuredClone(entries.agents),
     commands: structuredClone(entries.commands),
     memories: structuredClone(entries.memories),
+  }
+}
+
+function normalizeRevisionEntries(entries: Partial<RevisionEntries> | undefined): RevisionEntries {
+  return {
+    skills: entries?.skills ?? {},
+    agents: entries?.agents ?? {},
+    commands: entries?.commands ?? {},
+    memories: entries?.memories ?? {},
   }
 }
 
@@ -705,6 +982,16 @@ function toWorkspaceRelativePath(
   return relativePath.replaceAll("\\", "/")
 }
 
+function resolveWorkspaceRelativePath(
+  pluginFilePath: string,
+  runtimeContract: OCEvolverRuntimeContract,
+  relativePath: string,
+) {
+  const kernelPaths = resolveKernelPaths(pluginFilePath, runtimeContract)
+
+  return resolve(dirname(kernelPaths.opencodeRoot), relativePath)
+}
+
 async function collectInvalidArtifacts(input: {
   pluginFilePath: string
   runtimeContract: OCEvolverRuntimeContract
@@ -731,6 +1018,293 @@ async function collectInvalidArtifacts(input: {
       })
     }
   })
+}
+
+async function collectRegistryIntegrityFindings(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  registry: OCEvolverRegistry
+  invalid: InvalidArtifact[]
+}) {
+  for (const entry of Object.values(input.registry.skills)) {
+    await collectSkillIntegrityFindings({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      entry,
+      invalid: input.invalid,
+    })
+  }
+
+  for (const entry of Object.values(input.registry.agents)) {
+    await collectAgentIntegrityFindings({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      entry,
+      registry: input.registry,
+      invalid: input.invalid,
+    })
+  }
+
+  for (const entry of Object.values(input.registry.commands)) {
+    await collectCommandIntegrityFindings({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      entry,
+      registry: input.registry,
+      invalid: input.invalid,
+    })
+  }
+
+  for (const entry of Object.values(input.registry.memories)) {
+    await collectMemoryIntegrityFindings({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      entry,
+      invalid: input.invalid,
+    })
+  }
+}
+
+async function collectSkillIntegrityFindings(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  entry: SkillRegistryEntry
+  invalid: InvalidArtifact[]
+}) {
+  const document = await readTrackedArtifact({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    target: input.entry.nativePath,
+    kind: input.entry.kind,
+    invalid: input.invalid,
+  })
+
+  if (document === null) {
+    return
+  }
+
+  try {
+    parseSkillDocument(document)
+  } catch {
+    return
+  }
+
+  const skillRootPath = dirname(
+    resolveWorkspaceRelativePath(input.pluginFilePath, input.runtimeContract, input.entry.nativePath),
+  )
+  const helperFiles: SkillBundleFileInput[] = []
+
+  for (const helperPath of input.entry.helperPaths) {
+    const absoluteHelperPath = resolveWorkspaceRelativePath(
+      input.pluginFilePath,
+      input.runtimeContract,
+      helperPath,
+    )
+    const helperContent = await readFileIfExists(absoluteHelperPath)
+
+    if (helperContent === null) {
+      pushInvalidArtifact(input.invalid, {
+        target: input.entry.nativePath,
+        kind: input.entry.kind,
+        reason: `missing helper file: ${helperPath}`,
+      })
+      return
+    }
+
+    helperFiles.push({
+      relativePath: relative(skillRootPath, absoluteHelperPath).replaceAll("\\", "/"),
+      content: helperContent,
+    })
+  }
+
+  const contentHash = hashSkillDocument(document, helperFiles)
+
+  if (contentHash !== input.entry.contentHash) {
+    pushInvalidArtifact(input.invalid, {
+      target: input.entry.nativePath,
+      kind: input.entry.kind,
+      reason: `content hash mismatch for tracked ${input.entry.kind}`,
+    })
+  }
+}
+
+async function collectAgentIntegrityFindings(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  entry: AgentRegistryEntry
+  registry: OCEvolverRegistry
+  invalid: InvalidArtifact[]
+}) {
+  const document = await readTrackedArtifact({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    target: input.entry.nativePath,
+    kind: input.entry.kind,
+    invalid: input.invalid,
+  })
+
+  if (document === null) {
+    return
+  }
+
+  let parsedDocument
+
+  try {
+    parsedDocument = parseAgentDocument(document)
+  } catch {
+    return
+  }
+
+  for (const memoryName of parsedDocument.frontmatter.memory ?? []) {
+    if (!input.registry.memories[memoryName]) {
+      pushInvalidArtifact(input.invalid, {
+        target: input.entry.nativePath,
+        kind: input.entry.kind,
+        reason: `unknown memory profile referenced by agent: ${memoryName}`,
+      })
+    }
+  }
+
+  if (hashTextDocument(parsedDocument.raw) !== input.entry.contentHash) {
+    pushInvalidArtifact(input.invalid, {
+      target: input.entry.nativePath,
+      kind: input.entry.kind,
+      reason: `content hash mismatch for tracked ${input.entry.kind}`,
+    })
+  }
+}
+
+async function collectCommandIntegrityFindings(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  entry: CommandRegistryEntry
+  registry: OCEvolverRegistry
+  invalid: InvalidArtifact[]
+}) {
+  const document = await readTrackedArtifact({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    target: input.entry.nativePath,
+    kind: input.entry.kind,
+    invalid: input.invalid,
+  })
+
+  if (document === null) {
+    return
+  }
+
+  let parsedDocument
+
+  try {
+    parsedDocument = parseCommandDocument(document)
+  } catch {
+    return
+  }
+
+  if (parsedDocument.frontmatter.agent && !input.registry.agents[parsedDocument.frontmatter.agent]) {
+    pushInvalidArtifact(input.invalid, {
+      target: input.entry.nativePath,
+      kind: input.entry.kind,
+      reason: `unknown agent referenced by command: ${parsedDocument.frontmatter.agent}`,
+    })
+  }
+
+  if (hashTextDocument(parsedDocument.raw) !== input.entry.contentHash) {
+    pushInvalidArtifact(input.invalid, {
+      target: input.entry.nativePath,
+      kind: input.entry.kind,
+      reason: `content hash mismatch for tracked ${input.entry.kind}`,
+    })
+  }
+}
+
+async function collectMemoryIntegrityFindings(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  entry: MemoryRegistryEntry
+  invalid: InvalidArtifact[]
+}) {
+  const document = await readTrackedArtifact({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    target: input.entry.nativePath,
+    kind: input.entry.kind,
+    invalid: input.invalid,
+  })
+
+  if (document === null) {
+    return
+  }
+
+  let parsedDocument
+
+  try {
+    parsedDocument = parseMemoryDocument(document)
+  } catch {
+    return
+  }
+
+  if (hashTextDocument(parsedDocument.raw) !== input.entry.contentHash) {
+    pushInvalidArtifact(input.invalid, {
+      target: input.entry.nativePath,
+      kind: input.entry.kind,
+      reason: `content hash mismatch for tracked ${input.entry.kind}`,
+    })
+  }
+}
+
+async function readTrackedArtifact(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  target: string
+  kind: RegistryKind
+  invalid: InvalidArtifact[]
+}) {
+  const absolutePath = resolveWorkspaceRelativePath(
+    input.pluginFilePath,
+    input.runtimeContract,
+    input.target,
+  )
+  const document = await readFileIfExists(absolutePath)
+
+  if (document !== null) {
+    return document
+  }
+
+  pushInvalidArtifact(input.invalid, {
+    target: input.target,
+    kind: input.kind,
+    reason: `missing tracked artifact: ${input.target}`,
+  })
+
+  return null
+}
+
+async function readFileIfExists(filePath: string) {
+  try {
+    return await readFile(filePath, "utf8")
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return null
+    }
+
+    throw error
+  }
+}
+
+function pushInvalidArtifact(invalid: InvalidArtifact[], finding: InvalidArtifact) {
+  if (
+    invalid.some(
+      (entry) =>
+        entry.target === finding.target &&
+        entry.kind === finding.kind &&
+        entry.reason === finding.reason,
+    )
+  ) {
+    return
+  }
+
+  invalid.push(finding)
 }
 
 async function walkDirectorySafe(

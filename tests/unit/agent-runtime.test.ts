@@ -27,7 +27,9 @@ describe("agent runtime", () => {
         agents: {},
         commands: {},
         memories: {},
+        quarantine: {},
         currentRevision: null,
+        pendingRevision: null,
       }, null, 2),
     )
   })
@@ -412,5 +414,150 @@ Review markdown changes before they land.
     expect(JSON.stringify(promptCalls[1])).toContain("project-preferences")
     expect(JSON.stringify(promptCalls[1])).toContain("memory://plans/oc-evolver/*")
     expect(JSON.stringify(promptCalls[1])).toContain("Review relevant memory before proposing durable behavior changes")
+  })
+
+  test("evolver_run_command composes command, agent, memory, and model guidance into the session reply", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async (payload: unknown) => {
+            promptCalls.push(payload)
+            return { info: {}, parts: [] }
+          },
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_memory?.execute(
+      {
+        memoryName: "project-preferences",
+        document: `---
+name: project-preferences
+description: Shared project memory routing
+sources:
+  - memory://plans/oc-evolver/*
+---
+
+Prefer durable project guidance.
+`,
+      },
+      {
+        sessionID: "session-5",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_write_agent?.execute(
+      {
+        agentName: "fixture-reviewer",
+        document: `---
+description: Review markdown changes
+mode: subagent
+memory:
+  - project-preferences
+permission:
+  edit: deny
+model: openai/gpt-5.4-mini
+---
+
+Review markdown changes before they land.
+`,
+      },
+      {
+        sessionID: "session-5",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_write_command?.execute(
+      {
+        commandName: "review-markdown",
+        document: `---
+description: Review markdown files
+agent: fixture-reviewer
+model: openai/gpt-5.4
+---
+
+Focus on correctness and risk.
+`,
+      },
+      {
+        sessionID: "session-5",
+        messageID: "message-3",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_run_command?.execute(
+      {
+        commandName: "review-markdown",
+        prompt: "Review README.md and summarize the risk.",
+      },
+      {
+        sessionID: "session-5",
+        messageID: "message-4",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(promptCalls).toHaveLength(2)
+    expect(JSON.stringify(promptCalls[0])).toContain("evolver_run_agent")
+    expect(promptCalls[1]).toMatchObject({
+      path: { id: "session-5" },
+      body: {
+        noReply: true,
+      },
+    })
+    expect(JSON.stringify(promptCalls[1])).toContain("Run command: review-markdown")
+    expect(JSON.stringify(promptCalls[1])).toContain("fixture-reviewer")
+    expect(JSON.stringify(promptCalls[1])).toContain("Review markdown changes before they land")
+    expect(JSON.stringify(promptCalls[1])).toContain("Focus on correctness and risk")
+    expect(JSON.stringify(promptCalls[1])).toContain("project-preferences")
+    expect(JSON.stringify(promptCalls[1])).toContain("Preferred model: openai/gpt-5.4")
+    expect(JSON.stringify(promptCalls[1])).toContain("Review README.md and summarize the risk")
+
+    const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
+    expect(auditLog).toContain("run_command")
   })
 })

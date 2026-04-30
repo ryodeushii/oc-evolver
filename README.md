@@ -62,6 +62,7 @@ When the current workspace is the `oc-evolver` source repo itself, the plugin re
 The plugin exposes this stable v1 tool surface:
 
 - `evolver_status`
+- `evolver_check`
 - `evolver_validate`
 - `evolver_write_skill`
 - `evolver_write_agent`
@@ -70,7 +71,14 @@ The plugin exposes this stable v1 tool surface:
 - `evolver_apply_skill`
 - `evolver_apply_memory`
 - `evolver_run_agent`
+- `evolver_run_command`
+- `evolver_promote`
+- `evolver_reject`
 - `evolver_rollback`
+
+Mutable writes now land as pending revisions. Use `evolver_check` to see whether the registry is clean and whether a pending revision is still awaiting review, then use `evolver_promote` or `evolver_reject` to explicitly accept or discard that pending state.
+
+Commands are executable runtime artifacts rather than write-only markdown. `evolver_run_command` composes command instructions with any referenced agent instructions, inherited memory profiles, runtime permission metadata, and preferred model guidance.
 
 Memory profiles are versioned markdown artifacts stored under `.opencode/memory/`. They steer session behavior by injecting Basic Memory routing guidance, optional `storage_mode`, and reusable source/query hints into skill and agent composition without copying the underlying Basic Memory note corpus into the kernel registry.
 

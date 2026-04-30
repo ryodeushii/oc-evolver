@@ -126,6 +126,63 @@ Missing description.
     ).rejects.toThrow()
   })
 
+  test("replaces an existing skill bundle and removes helper files that are no longer present", async () => {
+    await materializeSkillBundle({
+      pluginFilePath,
+      runtimeContract,
+      bundle: {
+        rootDirName: "fixture-refactor",
+        skillDocument: `---
+name: fixture-refactor
+description: Rewrite TODO markers in markdown files
+---
+
+Use the first helper.
+`,
+        helperFiles: [
+          {
+            relativePath: "scripts/rewrite.py",
+            content: "print('rewrite')\n",
+          },
+        ],
+      },
+    })
+
+    await materializeSkillBundle({
+      pluginFilePath,
+      runtimeContract,
+      bundle: {
+        rootDirName: "fixture-refactor",
+        skillDocument: `---
+name: fixture-refactor
+description: Rewrite TODO markers in markdown files
+---
+
+Use the second helper.
+`,
+        helperFiles: [
+          {
+            relativePath: "templates/rewrite.md",
+            content: "# rewrite\n",
+          },
+        ],
+      },
+    })
+
+    expect(
+      await readFile(join(workspaceRoot, ".opencode/skills/fixture-refactor/SKILL.md"), "utf8"),
+    ).toContain("Use the second helper")
+    expect(
+      await readFile(
+        join(workspaceRoot, ".opencode/skills/fixture-refactor/templates/rewrite.md"),
+        "utf8",
+      ),
+    ).toContain("# rewrite")
+    await expect(
+      readFile(join(workspaceRoot, ".opencode/skills/fixture-refactor/scripts/rewrite.py"), "utf8"),
+    ).rejects.toThrow()
+  })
+
   test("cleans up temp files when a native write fails", async () => {
     const blockedRoot = join(workspaceRoot, ".opencode/commands")
     await writeFile(blockedRoot, "not a directory\n")

@@ -43,11 +43,21 @@ export async function materializeSkillBundle(input: {
     kernelPaths.skillsRoot,
     `.tmp-${bundle.rootDirName}-${randomUUID()}`,
   )
+  const backupRootPath = join(
+    kernelPaths.skillsRoot,
+    `.bak-${bundle.rootDirName}-${randomUUID()}`,
+  )
+  let existingBundleMoved = false
 
   await ensureAutonomousPathAllowed(
     input.pluginFilePath,
     input.runtimeContract,
     stagingRootPath,
+  )
+  await ensureAutonomousPathAllowed(
+    input.pluginFilePath,
+    input.runtimeContract,
+    backupRootPath,
   )
 
   try {
@@ -66,9 +76,28 @@ export async function materializeSkillBundle(input: {
       await writeFile(helperFilePath, helperFile.content)
     }
 
+    try {
+      await rename(bundleRootPath, backupRootPath)
+      existingBundleMoved = true
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+        throw error
+      }
+    }
+
     await rename(stagingRootPath, bundleRootPath)
+
+    if (existingBundleMoved) {
+      await rm(backupRootPath, { recursive: true, force: true })
+    }
   } catch (error) {
     await rm(stagingRootPath, { recursive: true, force: true })
+
+    if (existingBundleMoved) {
+      await rm(bundleRootPath, { recursive: true, force: true })
+      await rename(backupRootPath, bundleRootPath)
+    }
+
     throw error
   }
 

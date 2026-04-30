@@ -5,7 +5,7 @@ const PERMISSION_VALUES = ["allow", "ask", "deny"] as const
 const STORAGE_MODES = ["memory-only", "artifact-only", "memory-and-artifact"] as const
 
 type AgentMode = (typeof AGENT_MODES)[number]
-type PermissionValue = (typeof PERMISSION_VALUES)[number]
+export type PermissionValue = (typeof PERMISSION_VALUES)[number]
 export type SessionStorageMode = (typeof STORAGE_MODES)[number]
 
 type MarkdownDocument<TFrontmatter extends Record<string, unknown>> = {

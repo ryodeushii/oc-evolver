@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -7,6 +7,8 @@ import runtimeContract from "../../eval/runtime-contract.json"
 import {
   applyMutationTransaction,
   loadRegistry,
+  promotePendingRevision,
+  rejectPendingRevision,
   rollbackLatestRevision,
 } from "../../src/kernel/registry.ts"
 
@@ -30,6 +32,7 @@ describe("registry transactions", () => {
         memories: {},
         quarantine: {},
         currentRevision: null,
+        pendingRevision: null,
       }, null, 2),
     )
   })
@@ -46,10 +49,11 @@ describe("registry transactions", () => {
       memories: {},
       quarantine: {},
       currentRevision: null,
+      pendingRevision: null,
     })
   })
 
-  test("records a skill mutation in registry metadata and a revision snapshot", async () => {
+  test("records a skill mutation as a pending revision snapshot", async () => {
     const result = await applyMutationTransaction({
       pluginFilePath,
       runtimeContract,
@@ -73,7 +77,8 @@ Use the helper.
     })
 
     expect(result.revisionID).toBeString()
-    expect(result.registry.currentRevision).toBe(result.revisionID)
+    expect(result.registry.currentRevision).toBeNull()
+    expect(result.registry.pendingRevision).toBe(result.revisionID)
     expect(result.registry.skills["fixture-refactor"]).toMatchObject({
       kind: "skill",
       name: "fixture-refactor",
@@ -95,6 +100,7 @@ Use the helper.
       result.registry.skills["fixture-refactor"]?.contentHash,
     )
     expect(revision.previousRevisionID).toBeNull()
+    expect(revision.previousAcceptedRevisionID).toBeNull()
 
     const auditLines = (
       await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
@@ -111,7 +117,7 @@ Use the helper.
     })
   })
 
-  test("records a memory mutation in registry metadata and a revision snapshot", async () => {
+  test("records a memory mutation in registry metadata and a pending revision snapshot", async () => {
     const result = await applyMutationTransaction({
       pluginFilePath,
       runtimeContract,
@@ -135,7 +141,8 @@ Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance
     })
 
     expect(result.revisionID).toBeString()
-    expect(result.registry.currentRevision).toBe(result.revisionID)
+    expect(result.registry.currentRevision).toBeNull()
+    expect(result.registry.pendingRevision).toBe(result.revisionID)
     expect(result.registry.memories["project-preferences"]).toMatchObject({
       kind: "memory",
       name: "project-preferences",
@@ -173,7 +180,7 @@ Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance
     })
   })
 
-  test("rolls back the latest accepted revision", async () => {
+  test("promotes and rejects pending revisions explicitly", async () => {
     const first = await applyMutationTransaction({
       pluginFilePath,
       runtimeContract,
@@ -188,6 +195,12 @@ Review README.md.
 `,
       },
     })
+
+    const promoted = await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    expect(promoted.currentRevisionID).toBe(first.revisionID)
+    expect(promoted.pendingRevisionID).toBeNull()
+    expect((await loadRegistry(pluginFilePath, runtimeContract)).currentRevision).toBe(first.revisionID)
 
     const second = await applyMutationTransaction({
       pluginFilePath,
@@ -204,6 +217,52 @@ Review README.md twice.
       },
     })
 
+    const rejected = await rejectPendingRevision(pluginFilePath, runtimeContract)
+
+    expect(rejected.rejectedRevisionID).toBe(second.revisionID)
+    expect(rejected.restoredRevisionID).toBe(first.revisionID)
+    expect((await loadRegistry(pluginFilePath, runtimeContract))).toMatchObject({
+      currentRevision: first.revisionID,
+      pendingRevision: null,
+    })
+    expect(
+      await readFile(join(workspaceRoot, ".opencode/commands/review-markdown.md"), "utf8"),
+    ).toContain("First review flow")
+  })
+
+  test("rolls back the latest accepted revision and removes additive artifacts", async () => {
+    const first = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "review-markdown",
+        document: `---
+description: First review flow
+---
+
+Review README.md.
+        `,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    const second = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "review-summary",
+        document: `---
+description: Summary review flow
+---
+
+Review SUMMARY.md.
+`,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
     const rollback = await rollbackLatestRevision(pluginFilePath, runtimeContract)
 
     expect(rollback.currentRevisionID).toBe(first.revisionID)
@@ -211,6 +270,7 @@ Review README.md twice.
     expect(
       await readFile(join(workspaceRoot, ".opencode/commands/review-markdown.md"), "utf8"),
     ).toContain("First review flow")
+    await expect(access(join(workspaceRoot, ".opencode/commands/review-summary.md"))).rejects.toBeDefined()
 
     const auditLines = (
       await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")

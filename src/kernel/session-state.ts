@@ -3,15 +3,23 @@ import { dirname, join } from "node:path"
 
 import { resolveKernelPaths } from "./paths.ts"
 import type { OCEvolverRuntimeContract } from "./types.ts"
-import type { SessionStorageMode } from "./validate.ts"
+import type { PermissionValue, SessionStorageMode } from "./validate.ts"
 
 export type PersistedSessionMemoryState = {
   storageMode?: SessionStorageMode
 }
 
+export type PersistedRuntimePolicyState = {
+  sourceKind: "agent" | "command"
+  sourceName: string
+  toolPermissions?: Record<string, PermissionValue>
+  preferredModel?: string
+}
+
 export type PersistedSessionState = {
   memories?: Record<string, PersistedSessionMemoryState>
   operatorGuideApplied?: boolean
+  runtimePolicy?: PersistedRuntimePolicyState
 }
 
 export async function loadPersistedSessionState(input: {

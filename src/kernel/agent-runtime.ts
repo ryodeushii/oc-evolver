@@ -5,13 +5,21 @@ import { appendAuditEvent } from "./audit.ts"
 import { ensureOperatorGuideForSession } from "./operator-guide.ts"
 import { loadRegistry, rollbackLatestRevision } from "./registry.ts"
 import { resolveKernelPaths } from "./paths.ts"
-import { loadPersistedSessionState, persistSessionState } from "./session-state.ts"
+import {
+  loadPersistedSessionState,
+  persistSessionState,
+  type PersistedRuntimePolicyState,
+} from "./session-state.ts"
 import type { OCEvolverRuntimeContract } from "./types.ts"
 import {
   parseAgentDocument,
+  parseCommandDocument,
   parseMemoryDocument,
   parseSkillDocument,
+  type AgentDocument,
+  type CommandDocument,
   type MemoryDocument,
+  type PermissionValue,
   type SessionStorageMode,
 } from "./validate.ts"
 
@@ -32,7 +40,29 @@ type LoadedMemoryProfile = {
   document: MemoryDocument
 }
 
+type LoadedAgentProfile = {
+  name: string
+  nativePath: string
+  revisionID: string
+  document: AgentDocument
+}
+
+type LoadedCommandProfile = {
+  name: string
+  nativePath: string
+  revisionID: string
+  document: CommandDocument
+}
+
+type SessionRuntimePolicy = {
+  sourceKind: "agent" | "command"
+  sourceName: string
+  toolPermissions: Record<string, PermissionValue>
+  preferredModel?: string
+}
+
 const sessionMemories = new Map<string, Map<string, SessionMemoryState>>()
+const sessionRuntimePolicies = new Map<string, SessionRuntimePolicy | null>()
 
 export async function applySkillToSession(input: {
   client: SessionPromptClient
@@ -162,16 +192,11 @@ export async function runAgentInSession(input: {
   agentName: string
   prompt: string
 }) {
-  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
-  const registry = await loadRegistry(input.pluginFilePath, input.runtimeContract)
-  const agentEntry = registry.agents[input.agentName]
-
-  if (!agentEntry) {
-    throw new Error(`unknown agent: ${input.agentName}`)
-  }
-
-  const agentPath = join(kernelPaths.agentsRoot, `${input.agentName}.md`)
-  const agentDocument = parseAgentDocument(await readFile(agentPath, "utf8"))
+  const agentProfile = await loadAgentProfile({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    agentName: input.agentName,
+  })
   const memoryProfiles = await loadMemoryProfiles({
     pluginFilePath: input.pluginFilePath,
     runtimeContract: input.runtimeContract,
@@ -181,7 +206,7 @@ export async function runAgentInSession(input: {
           runtimeContract: input.runtimeContract,
           sessionID: input.sessionID,
         }),
-      agentDocument.frontmatter.memory ?? [],
+      agentProfile.document.frontmatter.memory ?? [],
     ),
   })
 
@@ -190,6 +215,19 @@ export async function runAgentInSession(input: {
     runtimeContract: input.runtimeContract,
     sessionID: input.sessionID,
     memoryProfiles,
+  })
+  await rememberSessionRuntimePolicy({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    runtimePolicy: {
+      sourceKind: "agent",
+      sourceName: agentProfile.name,
+      toolPermissions: agentProfile.document.frontmatter.permission ?? {},
+      ...(agentProfile.document.frontmatter.model
+        ? { preferredModel: agentProfile.document.frontmatter.model }
+        : {}),
+    },
   })
 
   await promptSession({
@@ -201,9 +239,12 @@ export async function runAgentInSession(input: {
       noReply: true,
       system: [
         `Run agent: ${input.agentName}`,
+        ...(agentProfile.document.frontmatter.model
+          ? [`Preferred model: ${agentProfile.document.frontmatter.model}`]
+          : []),
         ...memoryProfiles.map(formatMemoryProfilePrompt),
         "Agent instructions:",
-        agentDocument.body,
+        agentProfile.document.body,
       ].join("\n\n"),
       parts: [{ type: "text", text: input.prompt }],
     },
@@ -214,9 +255,98 @@ export async function runAgentInSession(input: {
     event: {
       action: "run_agent",
       status: "success",
-      target: agentEntry.nativePath,
-      revisionID: agentEntry.revisionID,
+      target: agentProfile.nativePath,
+      revisionID: agentProfile.revisionID,
       detail: `composed agent ${input.agentName} into session ${input.sessionID}`,
+    },
+  })
+}
+
+export async function runCommandInSession(input: {
+  client: SessionPromptClient
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+  commandName: string
+  prompt: string
+}) {
+  const commandProfile = await loadCommandProfile({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    commandName: input.commandName,
+  })
+  const agentProfile = commandProfile.document.frontmatter.agent
+    ? await loadAgentProfile({
+        pluginFilePath: input.pluginFilePath,
+        runtimeContract: input.runtimeContract,
+        agentName: commandProfile.document.frontmatter.agent,
+      })
+    : null
+  const preferredModel = commandProfile.document.frontmatter.model ?? agentProfile?.document.frontmatter.model
+  const memoryProfiles = await loadMemoryProfiles({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    memoryNames: mergeMemoryNames(
+      await getSessionMemoryNames({
+          pluginFilePath: input.pluginFilePath,
+          runtimeContract: input.runtimeContract,
+          sessionID: input.sessionID,
+        }),
+      agentProfile?.document.frontmatter.memory ?? [],
+    ),
+  })
+
+  await rememberLoadedMemoryProfiles({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    memoryProfiles,
+  })
+  await rememberSessionRuntimePolicy({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    runtimePolicy: {
+      sourceKind: "command",
+      sourceName: commandProfile.name,
+      toolPermissions: agentProfile?.document.frontmatter.permission ?? {},
+      ...(preferredModel ? { preferredModel } : {}),
+    },
+  })
+
+  const systemSections = [
+    `Run command: ${commandProfile.name}`,
+    ...(agentProfile ? [`Referenced agent: ${agentProfile.name}`] : []),
+    ...(preferredModel ? [`Preferred model: ${preferredModel}`] : []),
+    ...memoryProfiles.map(formatMemoryProfilePrompt),
+  ]
+
+  if (agentProfile) {
+    systemSections.push("Agent instructions:", agentProfile.document.body)
+  }
+
+  systemSections.push("Command instructions:", commandProfile.document.body)
+
+  await promptSession({
+    client: input.client,
+    sessionID: input.sessionID,
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    body: {
+      noReply: true,
+      system: systemSections.join("\n\n"),
+      parts: [{ type: "text", text: input.prompt }],
+    },
+  })
+  await appendAuditEvent({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    event: {
+      action: "run_command",
+      status: "success",
+      target: commandProfile.nativePath,
+      revisionID: commandProfile.revisionID,
+      detail: `composed command ${input.commandName} into session ${input.sessionID}`,
     },
   })
 }
@@ -266,6 +396,14 @@ export async function rollbackRevision(input: {
   return rollbackLatestRevision(input.pluginFilePath, input.runtimeContract)
 }
 
+export async function getSessionRuntimePolicy(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+}) {
+  return loadSessionRuntimePolicy(input)
+}
+
 async function loadMemoryProfiles(input: {
   pluginFilePath: string
   runtimeContract: OCEvolverRuntimeContract
@@ -310,12 +448,61 @@ async function loadMemoryProfile(input: {
   }
 }
 
+async function loadAgentProfile(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  agentName: string
+}): Promise<LoadedAgentProfile> {
+  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
+  const registry = await loadRegistry(input.pluginFilePath, input.runtimeContract)
+  const agentEntry = registry.agents[input.agentName]
+
+  if (!agentEntry) {
+    throw new Error(`unknown agent: ${input.agentName}`)
+  }
+
+  const agentPath = join(kernelPaths.agentsRoot, `${input.agentName}.md`)
+  const document = parseAgentDocument(await readFile(agentPath, "utf8"))
+
+  return {
+    name: input.agentName,
+    nativePath: agentEntry.nativePath,
+    revisionID: agentEntry.revisionID,
+    document,
+  }
+}
+
+async function loadCommandProfile(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  commandName: string
+}): Promise<LoadedCommandProfile> {
+  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
+  const registry = await loadRegistry(input.pluginFilePath, input.runtimeContract)
+  const commandEntry = registry.commands[input.commandName]
+
+  if (!commandEntry) {
+    throw new Error(`unknown command: ${input.commandName}`)
+  }
+
+  const commandPath = join(kernelPaths.commandsRoot, `${input.commandName}.md`)
+  const document = parseCommandDocument(await readFile(commandPath, "utf8"))
+
+  return {
+    name: input.commandName,
+    nativePath: commandEntry.nativePath,
+    revisionID: commandEntry.revisionID,
+    document,
+  }
+}
+
 async function rememberLoadedMemoryProfiles(input: {
   pluginFilePath: string
   runtimeContract: OCEvolverRuntimeContract
   sessionID: string
   memoryProfiles: LoadedMemoryProfile[]
 }) {
+  const sessionCacheKey = resolveSessionCacheKey(input)
   let appliedProfiles = await loadSessionMemoryState({
     pluginFilePath: input.pluginFilePath,
     runtimeContract: input.runtimeContract,
@@ -324,7 +511,7 @@ async function rememberLoadedMemoryProfiles(input: {
 
   if (!appliedProfiles) {
     appliedProfiles = new Map()
-    sessionMemories.set(input.sessionID, appliedProfiles)
+    sessionMemories.set(sessionCacheKey, appliedProfiles)
   }
 
   for (const profile of input.memoryProfiles) {
@@ -384,7 +571,8 @@ async function loadSessionMemoryState(input: {
   runtimeContract: OCEvolverRuntimeContract
   sessionID: string
 }) {
-  const cachedProfiles = sessionMemories.get(input.sessionID)
+  const sessionCacheKey = resolveSessionCacheKey(input)
+  const cachedProfiles = sessionMemories.get(sessionCacheKey)
 
   if (cachedProfiles) {
     return cachedProfiles
@@ -402,8 +590,29 @@ async function loadSessionMemoryState(input: {
     return null
   }
 
-  sessionMemories.set(input.sessionID, appliedProfiles)
+  sessionMemories.set(sessionCacheKey, appliedProfiles)
   return appliedProfiles
+}
+
+async function loadSessionRuntimePolicy(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+}): Promise<SessionRuntimePolicy | null> {
+  const sessionCacheKey = resolveSessionCacheKey(input)
+  const cachedPolicy = sessionRuntimePolicies.get(sessionCacheKey)
+
+  if (cachedPolicy !== undefined) {
+    return cachedPolicy
+  }
+
+  const persistedState = await loadPersistedSessionState(input)
+  const runtimePolicy = persistedState.runtimePolicy
+    ? hydrateRuntimePolicy(persistedState.runtimePolicy)
+    : null
+
+  sessionRuntimePolicies.set(sessionCacheKey, runtimePolicy)
+  return runtimePolicy
 }
 
 async function persistSessionMemoryState(input: {
@@ -424,6 +633,28 @@ async function persistSessionMemoryState(input: {
     },
   })
 }
+
+async function rememberSessionRuntimePolicy(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+  runtimePolicy: SessionRuntimePolicy
+}) {
+  sessionRuntimePolicies.set(resolveSessionCacheKey(input), input.runtimePolicy)
+
+  const persistedState = await loadPersistedSessionState(input)
+
+  await persistSessionState({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    state: {
+      ...persistedState,
+      runtimePolicy: serializeRuntimePolicy(input.runtimePolicy),
+    },
+  })
+}
+
 function mergeMemoryNames(...memoryNameLists: string[][]) {
   return [...new Set(memoryNameLists.flat())]
 }
@@ -463,4 +694,34 @@ function formatMemoryProfilePrompt(memoryProfile: LoadedMemoryProfile) {
 
 function resolveWorkspaceRelativePath(opencodeRoot: string, nativePath: string) {
   return resolve(dirname(opencodeRoot), nativePath)
+}
+
+function resolveSessionCacheKey(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+}) {
+  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
+
+  return `${kernelPaths.registryRoot}:${input.sessionID}`
+}
+
+function serializeRuntimePolicy(runtimePolicy: SessionRuntimePolicy): PersistedRuntimePolicyState {
+  return {
+    sourceKind: runtimePolicy.sourceKind,
+    sourceName: runtimePolicy.sourceName,
+    ...(Object.keys(runtimePolicy.toolPermissions).length > 0
+      ? { toolPermissions: runtimePolicy.toolPermissions }
+      : {}),
+    ...(runtimePolicy.preferredModel ? { preferredModel: runtimePolicy.preferredModel } : {}),
+  }
+}
+
+function hydrateRuntimePolicy(runtimePolicy: PersistedRuntimePolicyState): SessionRuntimePolicy {
+  return {
+    sourceKind: runtimePolicy.sourceKind,
+    sourceName: runtimePolicy.sourceName,
+    toolPermissions: runtimePolicy.toolPermissions ?? {},
+    ...(runtimePolicy.preferredModel ? { preferredModel: runtimePolicy.preferredModel } : {}),
+  }
 }

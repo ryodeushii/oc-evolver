@@ -9,15 +9,19 @@ import { appendAuditEvent, recordPolicyDeniedEvent } from "./kernel/audit.ts"
 import {
   applyMemoryToSession,
   applySkillToSession,
+  getSessionRuntimePolicy,
   getSessionStorageMode,
   rollbackRevision,
   runAgentInSession,
+  runCommandInSession,
 } from "./kernel/agent-runtime.ts"
 import { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 import {
   applyMutationTransaction,
   ensureKernelRuntimePaths,
   loadRegistry,
+  promotePendingRevision,
+  rejectPendingRevision,
   validateRegistryArtifacts,
 } from "./kernel/registry.ts"
 import {
@@ -32,6 +36,7 @@ export { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 type PermissionRequest = {
   type: string
   pattern?: string | string[]
+  sessionID?: string
 }
 
 const MUTATING_PERMISSION_TYPES = new Set(["create", "delete", "edit", "move", "write"])
@@ -158,6 +163,38 @@ function extractPatchTargetPaths(patchText: string) {
   return targets
 }
 
+function resolveRuntimePermissionValue(input: {
+  runtimePolicy: { toolPermissions: Record<string, "allow" | "ask" | "deny"> } | null
+  toolName?: string
+  permissionType?: string
+}) {
+  if (!input.runtimePolicy) {
+    return null
+  }
+
+  if (input.toolName) {
+    const toolPermission = input.runtimePolicy.toolPermissions[input.toolName]
+
+    if (toolPermission) {
+      return toolPermission
+    }
+  }
+
+  if (input.permissionType) {
+    return input.runtimePolicy.toolPermissions[input.permissionType] ?? null
+  }
+
+  return null
+}
+
+function getToolPermissionType(toolName: string) {
+  if (toolName === "apply_patch") {
+    return "edit"
+  }
+
+  return null
+}
+
 export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
   return async (ctx) => {
     const isDevelopmentWorkspace = isKernelDevelopmentWorkspace(ctx.project.worktree)
@@ -223,6 +260,40 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
             })
 
             return `validated ${args.kind}`
+          },
+        }),
+        evolver_check: tool({
+          description: "Check mutable roots for invalid artifacts and pending revisions",
+          args: {},
+          async execute() {
+            const result = await validateRegistryArtifacts(pluginFilePath, runtimeContract)
+            const ok = result.invalid.length === 0 && result.registry.pendingRevision === null
+
+            await appendAuditEvent({
+              pluginFilePath,
+              runtimeContract,
+              event: {
+                action: "check",
+                status: ok ? "success" : "failure",
+                target: ".opencode/oc-evolver/registry.json",
+                detail: ok
+                  ? "mutable roots are valid and no pending revision exists"
+                  : result.registry.pendingRevision
+                    ? `mutable roots need attention; pending revision ${result.registry.pendingRevision} is still awaiting promotion`
+                    : "mutable roots need attention due to invalid artifacts",
+              },
+            })
+
+            return JSON.stringify(
+              {
+                ok,
+                currentRevision: result.registry.currentRevision,
+                pendingRevision: result.registry.pendingRevision,
+                invalid: result.invalid,
+              },
+              null,
+              2,
+            )
           },
         }),
         evolver_write_skill: tool({
@@ -365,6 +436,25 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
             return `ran agent ${args.agentName}`
           },
         }),
+        evolver_run_command: tool({
+          description: "Run a command in current session",
+          args: {
+            commandName: tool.schema.string(),
+            prompt: tool.schema.string(),
+          },
+          async execute(args, toolCtx) {
+            await runCommandInSession({
+              client: ctx.client,
+              pluginFilePath,
+              runtimeContract,
+              sessionID: toolCtx.sessionID,
+              commandName: args.commandName,
+              prompt: args.prompt,
+            })
+
+            return `ran command ${args.commandName}`
+          },
+        }),
         evolver_rollback: tool({
           description: "Rollback latest accepted revision",
           args: {},
@@ -377,11 +467,62 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
             return JSON.stringify(result)
           },
         }),
+        evolver_promote: tool({
+          description: "Promote pending revision to accepted",
+          args: {},
+          async execute() {
+            const result = await promotePendingRevision(pluginFilePath, runtimeContract)
+
+            return JSON.stringify(result)
+          },
+        }),
+        evolver_reject: tool({
+          description: "Reject pending revision and restore accepted state",
+          args: {},
+          async execute() {
+            const result = await rejectPendingRevision(pluginFilePath, runtimeContract)
+
+            return JSON.stringify(result)
+          },
+        }),
       },
       config: async () => {
         await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
       },
       "permission.ask": async (permission, output) => {
+        const runtimePolicy = permission.sessionID
+          ? await getSessionRuntimePolicy({
+              pluginFilePath,
+              runtimeContract,
+              sessionID: permission.sessionID,
+            })
+          : null
+        const runtimePermission = resolveRuntimePermissionValue({
+          runtimePolicy,
+          permissionType: permission.type,
+        })
+
+        if (runtimePermission === "deny") {
+          output.status = "deny"
+          const deniedTarget = Array.isArray(permission.pattern)
+            ? permission.pattern.join(", ")
+            : permission.pattern ?? permission.type
+
+          await recordPolicyDeniedEvent({
+            pluginFilePath,
+            runtimeContract,
+            target: deniedTarget,
+            detail: `${runtimePolicy?.sourceName ?? "runtime policy"} permission ${permission.type}=deny forbids this action`,
+          })
+
+          return
+        }
+
+        if (runtimePermission === "allow") {
+          output.status = "allow"
+          return
+        }
+
         if (!isMutatingPermission(permission) || isDevelopmentWorkspace) {
           return
         }
@@ -406,11 +547,37 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
         }
       },
       "tool.execute.before": async (input, output) => {
+        const runtimePolicy = await getSessionRuntimePolicy({
+          pluginFilePath,
+          runtimeContract,
+          sessionID: input.sessionID,
+        })
         const sessionStorageMode = await getSessionStorageMode({
           pluginFilePath,
           runtimeContract,
           sessionID: input.sessionID,
         })
+        const runtimePermission = resolveRuntimePermissionValue({
+          runtimePolicy,
+          toolName: input.tool,
+          permissionType: getToolPermissionType(input.tool) ?? undefined,
+        })
+
+        if (runtimePermission === "deny") {
+          const permissionType = getToolPermissionType(input.tool)
+          const detail = permissionType
+            ? `${runtimePolicy?.sourceName ?? "runtime policy"} permission ${permissionType}=deny forbids tool ${input.tool}`
+            : `${runtimePolicy?.sourceName ?? "runtime policy"} forbids tool ${input.tool}`
+
+          await recordPolicyDeniedEvent({
+            pluginFilePath,
+            runtimeContract,
+            target: input.tool,
+            detail,
+          })
+
+          throw new Error(detail)
+        }
 
         if (
           sessionStorageMode === "artifact-only" &&

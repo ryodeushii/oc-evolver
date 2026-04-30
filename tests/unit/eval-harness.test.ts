@@ -28,7 +28,19 @@ describe("evaluation harness", () => {
     )
     await writeFile(
       join(repoRoot, "eval/fixtures/base/.opencode/oc-evolver/registry.json"),
-      JSON.stringify({ skills: {}, agents: {}, commands: {}, currentRevision: null }, null, 2),
+      JSON.stringify(
+        {
+          skills: {},
+          agents: {},
+          commands: {},
+          memories: {},
+          quarantine: {},
+          currentRevision: null,
+          pendingRevision: null,
+        },
+        null,
+        2,
+      ),
     )
     await writeFile(join(repoRoot, "eval/fixtures/base/README.md"), "TODO: base fixture\n")
     await writeFile(
@@ -80,7 +92,10 @@ describe("evaluation harness", () => {
               },
               agents: {},
               commands: {},
+              memories: {},
+              quarantine: {},
               currentRevision: "rev-1",
+              pendingRevision: null,
             },
             null,
             2,
@@ -420,11 +435,15 @@ describe("evaluation harness", () => {
           )
           await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-            '{"action":"rollback","status":"success"}\n',
+            [
+              '{"action":"promote","status":"success","revisionID":"rev-first"}',
+              '{"action":"promote","status":"success","revisionID":"rev-second"}',
+              '{"action":"rollback","status":"success","revisionID":"rev-first","rolledBackRevisionID":"rev-second"}',
+            ].join("\n") + "\n",
           )
           await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
-            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-first" }, null, 2),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-first", pendingRevision: null }, null, 2),
           )
 
           return { stdout: '{"type":"text","text":"rolled back"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
@@ -570,11 +589,15 @@ describe("evaluation harness", () => {
           )
           await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-            '{"action":"rollback","status":"success"}\n',
+            [
+              '{"action":"promote","status":"success","revisionID":"rev-first"}',
+              '{"action":"promote","status":"success","revisionID":"rev-second"}',
+              '{"action":"rollback","status":"success","revisionID":"rev-first","rolledBackRevisionID":"rev-second"}',
+            ].join("\n") + "\n",
           )
           await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
-            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-second" }, null, 2),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-second", pendingRevision: null }, null, 2),
           )
 
           return { stdout: '{"type":"text","text":"rolled back"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
@@ -604,11 +627,15 @@ describe("evaluation harness", () => {
           )
           await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-            '{"action":"rollback","status":"success","revisionID":"restored-rev","rolledBackRevisionID":"replaced-rev"}\n',
+            [
+              '{"action":"promote","status":"success","revisionID":"rev-first"}',
+              '{"action":"promote","status":"success","revisionID":"rev-second"}',
+              '{"action":"rollback","status":"success","revisionID":"restored-rev","rolledBackRevisionID":"replaced-rev"}',
+            ].join("\n") + "\n",
           )
           await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
-            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "restored-rev" }, null, 2),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "restored-rev", pendingRevision: null }, null, 2),
           )
 
           return { stdout: '{"type":"text","text":"rolled back"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult

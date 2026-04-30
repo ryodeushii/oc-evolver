@@ -1,3 +1,4 @@
+import { resolveKernelPaths } from "./paths.ts"
 import { loadPersistedSessionState, persistSessionState } from "./session-state.ts"
 import type { OCEvolverRuntimeContract } from "./types.ts"
 
@@ -16,6 +17,8 @@ export function buildOperatorGuide() {
     "- Use evolver_write_skill, evolver_write_agent, evolver_write_command, and evolver_write_memory to create or update mutable kernel artifacts under .opencode/*.",
     "- Use evolver_apply_skill and evolver_apply_memory to inject reusable behavior into the current session.",
     "- Use evolver_run_agent for reusable subagent behavior.",
+    "- Use evolver_run_command to execute reusable command behavior, including any referenced agent instructions.",
+    "- Use evolver_promote and evolver_reject to explicitly accept or discard pending revisions.",
     "- Use evolver_rollback to restore the previous accepted revision when a mutation turns out to be wrong.",
     "- Docs, specs, research, architecture notes, and durable knowledge default to Basic Memory unless the user asked for a repository artifact.",
     "- Respect session storage modes: memory-only, artifact-only, memory-and-artifact.",
@@ -28,7 +31,9 @@ export async function ensureOperatorGuideForSession(input: {
   runtimeContract?: OCEvolverRuntimeContract
   sessionID: string
 }) {
-  if (guidedSessions.has(input.sessionID)) {
+  const sessionCacheKey = resolveSessionCacheKey(input)
+
+  if (guidedSessions.has(sessionCacheKey)) {
     return
   }
 
@@ -40,7 +45,7 @@ export async function ensureOperatorGuideForSession(input: {
     })
 
     if (persistedState.operatorGuideApplied) {
-      guidedSessions.add(input.sessionID)
+      guidedSessions.add(sessionCacheKey)
       return
     }
   }
@@ -53,7 +58,7 @@ export async function ensureOperatorGuideForSession(input: {
     },
   })
 
-  guidedSessions.add(input.sessionID)
+  guidedSessions.add(sessionCacheKey)
 
   if (input.pluginFilePath && input.runtimeContract) {
     const persistedState = await loadPersistedSessionState({
@@ -72,4 +77,18 @@ export async function ensureOperatorGuideForSession(input: {
       },
     })
   }
+}
+
+function resolveSessionCacheKey(input: {
+  pluginFilePath?: string
+  runtimeContract?: OCEvolverRuntimeContract
+  sessionID: string
+}) {
+  if (!input.pluginFilePath || !input.runtimeContract) {
+    return input.sessionID
+  }
+
+  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
+
+  return `${kernelPaths.registryRoot}:${input.sessionID}`
 }

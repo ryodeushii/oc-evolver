@@ -9,6 +9,7 @@ import type { OCEvolverRuntimeContract } from "./types.ts"
 export type AuditEvent = {
   action:
     | "validate"
+    | "check"
     | "write_skill"
     | "write_agent"
     | "write_command"
@@ -16,6 +17,9 @@ export type AuditEvent = {
     | "apply_skill"
     | "apply_memory"
     | "run_agent"
+    | "run_command"
+    | "promote"
+    | "reject"
     | "rollback"
     | "policy_denied"
   status: "success" | "failure"
