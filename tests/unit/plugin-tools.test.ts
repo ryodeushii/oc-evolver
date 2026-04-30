@@ -23,6 +23,20 @@ describe("plugin tool surface", () => {
     await rm(workspaceRoot, { recursive: true, force: true })
   })
 
+  async function runBunEval(code: string) {
+    const process = Bun.spawn(["bun", "--eval", code], {
+      cwd: workspaceRoot,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+
+    const exitCode = await process.exited
+    const stdout = await new Response(process.stdout).text()
+    const stderr = await new Response(process.stderr).text()
+
+    return { exitCode, stdout, stderr }
+  }
+
   test("registers the stable v1 kernel tool set", async () => {
     const hooks = await OCEvolverPlugin({
       client: {
@@ -326,6 +340,115 @@ describe("plugin tool surface", () => {
 
     expect(auditLog).toContain("policy_denied")
     expect(auditLog).toContain(".opencode/plugins/oc-evolver.ts")
+  })
+
+  test("persists artifact-only memory policy across continued sessions", async () => {
+    const firstRun = await runBunEval(`
+      const { OCEvolverPlugin } = await import("file:///home/ryodeushii/repos/oc-evolver/src/oc-evolver.ts")
+      const workspaceRoot = process.cwd()
+      const hooks = await OCEvolverPlugin({
+        client: {
+          session: {
+            prompt: async () => ({ info: {}, parts: [] }),
+          },
+        },
+        project: {
+          id: "fixture-project",
+          worktree: workspaceRoot,
+        },
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        experimental_workspace: {
+          register() {},
+        },
+        serverUrl: new URL("http://localhost:4096"),
+        $: {},
+      })
+
+      await hooks.tool.evolver_write_memory.execute(
+        {
+          memoryName: "artifact-only-session",
+          document: "---\\nname: artifact-only-session\\ndescription: Forbid Basic Memory writes for this session\\nstorage_mode: artifact-only\\n---\\n\\nRoute durable notes to repo artifacts only.\\n",
+        },
+        {
+          sessionID: "session-persisted-artifact-only",
+          messageID: "message-1",
+          agent: "main",
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          abort: new AbortController().signal,
+          metadata() {},
+          ask() {
+            throw new Error("not implemented")
+          },
+        },
+      )
+
+      await hooks.tool.evolver_apply_memory.execute(
+        {
+          memoryName: "artifact-only-session",
+        },
+        {
+          sessionID: "session-persisted-artifact-only",
+          messageID: "message-2",
+          agent: "main",
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          abort: new AbortController().signal,
+          metadata() {},
+          ask() {
+            throw new Error("not implemented")
+          },
+        },
+      )
+
+      console.log("applied")
+    `)
+
+    expect(firstRun.exitCode).toBe(0)
+    expect(firstRun.stdout).toContain("applied")
+
+    const secondRun = await runBunEval(`
+      const { OCEvolverPlugin } = await import("file:///home/ryodeushii/repos/oc-evolver/src/oc-evolver.ts")
+      const workspaceRoot = process.cwd()
+      const hooks = await OCEvolverPlugin({
+        client: {
+          session: {
+            prompt: async () => ({ info: {}, parts: [] }),
+          },
+        },
+        project: {
+          id: "fixture-project",
+          worktree: workspaceRoot,
+        },
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        experimental_workspace: {
+          register() {},
+        },
+        serverUrl: new URL("http://localhost:4096"),
+        $: {},
+      })
+
+      try {
+        await hooks["tool.execute.before"](
+          {
+            tool: "basic-memory_write_note",
+            sessionID: "session-persisted-artifact-only",
+            callID: "call-persisted-artifact-only",
+          },
+          {},
+        )
+        console.log("allowed")
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error))
+        process.exit(1)
+      }
+    `)
+
+    expect(secondRun.exitCode).toBe(1)
+    expect(secondRun.stderr).toContain("artifact-only forbids Basic Memory writes")
+    expect(secondRun.stdout).not.toContain("allowed")
   })
 
   test("allows source repo edits in an oc-evolver development workspace", async () => {

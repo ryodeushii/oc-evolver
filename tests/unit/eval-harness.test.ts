@@ -199,4 +199,64 @@ describe("evaluation harness", () => {
 
     expect(resultJson.changedFiles).toEqual(["README.md"])
   })
+  test("runEvaluationScenario rejects create-skill artifacts that miss the canonical helper path", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/create-skill.md"),
+      "Create the fixture skill and helper.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "create-skill",
+        timestamp: "2026-04-30T12-10-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/skills/fixture-refactor"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/skills/fixture-refactor/SKILL.md"),
+            "---\nname: fixture-refactor\ndescription: Rewrite TODO markers\n---\n\nUse the helper.\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/skills/fixture-refactor/fixture_refactor.py"),
+            "print('rewrite')\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            '{"action":"write_skill","status":"success"}\n',
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify(
+              {
+                skills: {
+                  "fixture-refactor": {
+                    kind: "skill",
+                    name: "fixture-refactor",
+                    nativePath: ".opencode/skills/fixture-refactor/SKILL.md",
+                    helperPaths: [".opencode/skills/fixture-refactor/fixture_refactor.py"],
+                    revisionID: "rev-skill",
+                    contentHash: "a".repeat(64),
+                  },
+                },
+                agents: {},
+                commands: {},
+                quarantine: {},
+                currentRevision: "rev-skill",
+              },
+              null,
+              2,
+            ),
+          )
+
+          return {
+            stdout: '{"type":"text","text":"created skill"}',
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/rewrite_todo_to_note.py/i)
+  })
+
 })

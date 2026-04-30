@@ -174,6 +174,11 @@ export async function runEvaluationScenario(input: {
   }
 
   await assertProtectedPluginFileUnchanged(baseFixtureRoot, workspaceRoot)
+  await assertScenarioArtifacts({
+    scenarioName: input.scenarioName,
+    workspaceRoot,
+    changedFiles,
+  })
 
   return {
     scenarioName: input.scenarioName,
@@ -352,6 +357,37 @@ async function seedScenarioWorkspace(scenarioName: string, workspaceRoot: string
   )
 }
 
+async function assertScenarioArtifacts(input: {
+  scenarioName: string
+  workspaceRoot: string
+  changedFiles: string[]
+}) {
+  if (input.scenarioName !== "create-skill") {
+    return
+  }
+
+  const canonicalHelperPath = ".opencode/skills/fixture-refactor/scripts/rewrite_todo_to_note.py"
+
+  if (!input.changedFiles.includes(canonicalHelperPath)) {
+    throw new Error(
+      `scenario create-skill missing canonical helper artifact: ${canonicalHelperPath}`,
+    )
+  }
+
+  const registry = JSON.parse(
+    await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
+  ) as {
+    skills?: Record<string, { helperPaths?: string[] }>
+  }
+
+  const helperPaths = registry.skills?.["fixture-refactor"]?.helperPaths
+
+  if (!Array.isArray(helperPaths) || !helperPaths.includes(canonicalHelperPath)) {
+    throw new Error(
+      `scenario create-skill registry missing canonical helper path: ${canonicalHelperPath}`,
+    )
+  }
+}
 async function assertProtectedPluginFileUnchanged(baseFixtureRoot: string, workspaceRoot: string) {
   const protectedRelativePath = ".opencode/plugins/oc-evolver.ts"
   const basePluginPath = join(baseFixtureRoot, protectedRelativePath)

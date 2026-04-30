@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
 import { appendAuditEvent } from "./audit.ts"
@@ -61,12 +61,21 @@ export async function applySkillToSession(input: {
     pluginFilePath: input.pluginFilePath,
     runtimeContract: input.runtimeContract,
     memoryNames: mergeMemoryNames(
-      getSessionMemoryNames(input.sessionID),
+      await getSessionMemoryNames({
+          pluginFilePath: input.pluginFilePath,
+          runtimeContract: input.runtimeContract,
+          sessionID: input.sessionID,
+        }),
       skillDocument.frontmatter.memory ?? [],
     ),
   })
 
-  rememberLoadedMemoryProfiles(input.sessionID, memoryProfiles)
+  await rememberLoadedMemoryProfiles({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    memoryProfiles,
+  })
 
   const promptSections = [
     `Apply skill: ${input.skillName}`,
@@ -112,7 +121,12 @@ export async function applyMemoryToSession(input: {
     memoryName: input.memoryName,
   })
 
-  rememberLoadedMemoryProfiles(input.sessionID, [memoryProfile])
+  await rememberLoadedMemoryProfiles({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    memoryProfiles: [memoryProfile],
+  })
 
   await promptSession({
     client: input.client,
@@ -157,12 +171,21 @@ export async function runAgentInSession(input: {
     pluginFilePath: input.pluginFilePath,
     runtimeContract: input.runtimeContract,
     memoryNames: mergeMemoryNames(
-      getSessionMemoryNames(input.sessionID),
+      await getSessionMemoryNames({
+          pluginFilePath: input.pluginFilePath,
+          runtimeContract: input.runtimeContract,
+          sessionID: input.sessionID,
+        }),
       agentDocument.frontmatter.memory ?? [],
     ),
   })
 
-  rememberLoadedMemoryProfiles(input.sessionID, memoryProfiles)
+  await rememberLoadedMemoryProfiles({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    memoryProfiles,
+  })
 
   await promptSession({
     client: input.client,
@@ -211,36 +234,18 @@ async function promptSession(input: {
   })
 }
 
-export function getSessionStorageMode(sessionID: string): SessionStorageMode | null {
-  const appliedProfiles = sessionMemories.get(sessionID)
-
-  if (!appliedProfiles) {
-    return null
-  }
-
-  const modes = new Set(
-    [...appliedProfiles.values()].flatMap((profile) =>
-      profile.storageMode ? [profile.storageMode] : [],
-    ),
+export async function getSessionStorageMode(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+}): Promise<SessionStorageMode | null> {
+  return computeSessionStorageMode(
+    await loadSessionMemoryState({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      sessionID: input.sessionID,
+    }),
   )
-
-  if (modes.size === 0) {
-    return null
-  }
-
-  if (modes.has("memory-and-artifact")) {
-    return "memory-and-artifact"
-  }
-
-  if (modes.has("memory-only") && modes.has("artifact-only")) {
-    return "memory-and-artifact"
-  }
-
-  if (modes.has("memory-only")) {
-    return "memory-only"
-  }
-
-  return "artifact-only"
 }
 
 export async function rollbackRevision(input: {
@@ -294,23 +299,144 @@ async function loadMemoryProfile(input: {
   }
 }
 
-function rememberLoadedMemoryProfiles(sessionID: string, memoryProfiles: LoadedMemoryProfile[]) {
-  let appliedProfiles = sessionMemories.get(sessionID)
+async function rememberLoadedMemoryProfiles(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+  memoryProfiles: LoadedMemoryProfile[]
+}) {
+  let appliedProfiles = await loadSessionMemoryState({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+  })
 
   if (!appliedProfiles) {
     appliedProfiles = new Map()
-    sessionMemories.set(sessionID, appliedProfiles)
+    sessionMemories.set(input.sessionID, appliedProfiles)
   }
 
-  for (const profile of memoryProfiles) {
+  for (const profile of input.memoryProfiles) {
     appliedProfiles.set(profile.name, {
       storageMode: profile.document.frontmatter.storage_mode,
     })
   }
+
+  await persistSessionMemoryState({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    appliedProfiles,
+  })
 }
 
-function getSessionMemoryNames(sessionID: string) {
-  return [...(sessionMemories.get(sessionID)?.keys() ?? [])]
+async function getSessionMemoryNames(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+}) {
+  return [...((await loadSessionMemoryState(input))?.keys() ?? [])]
+}
+
+function computeSessionStorageMode(appliedProfiles: Map<string, SessionMemoryState> | null) {
+  if (!appliedProfiles) {
+    return null
+  }
+
+  const modes = new Set(
+    [...appliedProfiles.values()].flatMap((profile) =>
+      profile.storageMode ? [profile.storageMode] : [],
+    ),
+  )
+
+  if (modes.size === 0) {
+    return null
+  }
+
+  if (modes.has("memory-and-artifact")) {
+    return "memory-and-artifact"
+  }
+
+  if (modes.has("memory-only") && modes.has("artifact-only")) {
+    return "memory-and-artifact"
+  }
+
+  if (modes.has("memory-only")) {
+    return "memory-only"
+  }
+
+  return "artifact-only"
+}
+
+async function loadSessionMemoryState(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+}) {
+  const cachedProfiles = sessionMemories.get(input.sessionID)
+
+  if (cachedProfiles) {
+    return cachedProfiles
+  }
+
+  try {
+    const persistedState = JSON.parse(
+      await readFile(resolveSessionStatePath(input.pluginFilePath, input.runtimeContract, input.sessionID), "utf8"),
+    ) as {
+      memories?: Record<string, SessionMemoryState>
+    }
+
+    const appliedProfiles = new Map(
+      Object.entries(persistedState.memories ?? {}).map(([memoryName, profile]) => [
+        memoryName,
+        { storageMode: profile.storageMode },
+      ]),
+    )
+
+    sessionMemories.set(input.sessionID, appliedProfiles)
+    return appliedProfiles
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return null
+    }
+
+    throw error
+  }
+}
+
+async function persistSessionMemoryState(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+  appliedProfiles: Map<string, SessionMemoryState>
+}) {
+  const sessionStatePath = resolveSessionStatePath(
+    input.pluginFilePath,
+    input.runtimeContract,
+    input.sessionID,
+  )
+
+  await mkdir(dirname(sessionStatePath), { recursive: true })
+  await writeFile(
+    sessionStatePath,
+    JSON.stringify(
+      {
+        memories: Object.fromEntries(input.appliedProfiles.entries()),
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+function resolveSessionStatePath(
+  pluginFilePath: string,
+  runtimeContract: OCEvolverRuntimeContract,
+  sessionID: string,
+) {
+  const kernelPaths = resolveKernelPaths(pluginFilePath, runtimeContract)
+
+  return join(kernelPaths.registryRoot, "sessions", `${encodeURIComponent(sessionID)}.json`)
 }
 
 function mergeMemoryNames(...memoryNameLists: string[][]) {
