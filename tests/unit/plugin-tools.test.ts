@@ -123,6 +123,63 @@ describe("plugin tool surface", () => {
     await expect(access(join(projectRoot, ".opencode/oc-evolver"))).rejects.toBeDefined()
   })
 
+  test("uses the registered global config root for package-installed plugins", async () => {
+    const projectRoot = join(workspaceRoot, "project")
+    const globalConfigHome = join(workspaceRoot, "xdg-config")
+    const globalOpencodeRoot = join(globalConfigHome, "opencode")
+    const originalXdgConfigHome = process.env.XDG_CONFIG_HOME
+    const originalHome = process.env.HOME
+
+    await mkdir(projectRoot, { recursive: true })
+    await mkdir(globalOpencodeRoot, { recursive: true })
+    await writeFile(
+      join(globalOpencodeRoot, "opencode.jsonc"),
+      JSON.stringify(
+        {
+          plugin: ["oc-evolver@git+https://github.com/ryodeushii/oc-evolver.git"],
+        },
+        null,
+        2,
+      ),
+    )
+
+    process.env.XDG_CONFIG_HOME = globalConfigHome
+    process.env.HOME = workspaceRoot
+
+    try {
+      const hooks = await OCEvolverPlugin({
+        client: {
+          session: {
+            prompt: async () => ({ info: {}, parts: [] }),
+          },
+        },
+        project: {
+          id: "fixture-project",
+          worktree: projectRoot,
+        },
+        directory: projectRoot,
+        worktree: projectRoot,
+        experimental_workspace: {
+          register() {},
+        },
+        serverUrl: new URL("http://localhost:4096"),
+        $: {} as never,
+      } as never)
+
+      await hooks.config?.({} as never)
+
+      await access(join(globalOpencodeRoot, "oc-evolver"))
+      await access(join(globalOpencodeRoot, "skills"))
+      await access(join(globalOpencodeRoot, "agent"))
+      await access(join(globalOpencodeRoot, "commands"))
+
+      await expect(access(join(projectRoot, ".opencode/oc-evolver"))).rejects.toBeDefined()
+    } finally {
+      process.env.XDG_CONFIG_HOME = originalXdgConfigHome
+      process.env.HOME = originalHome
+    }
+  })
+
   test("bootstraps plugin-owned runtime directories during config", async () => {
     await rm(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true, force: true })
 

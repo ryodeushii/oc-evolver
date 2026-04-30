@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs"
+import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { join, resolve } from "node:path"
 
@@ -32,12 +34,53 @@ type PermissionRequest = {
 
 const MUTATING_PERMISSION_TYPES = new Set(["create", "delete", "edit", "move", "write"])
 
+const CONFIG_FILE_NAMES = ["opencode.jsonc", "opencode.json"]
+const CONFIG_PLUGIN_HINTS = ["oc-evolver", "oc-resolver", "github.com/ryodeushii/oc-evolver"]
+
 function resolvePluginFilePath(ctx: { directory: string; worktree: string }) {
-  return join(ctx.directory, runtimeContract.pluginDir, "oc-evolver.ts")
+  const localPluginFilePath = join(ctx.directory, runtimeContract.pluginDir, "oc-evolver.ts")
+
+  if (existsSync(localPluginFilePath) || isPluginRegisteredInOpencodeRoot(join(ctx.directory, ".opencode"))) {
+    return localPluginFilePath
+  }
+
+  const globalOpencodeRoot = resolveGlobalOpencodeRoot()
+
+  // Package-installed global plugins do not have a project-local bridge file,
+  // so fall back to the global config root that registered the plugin.
+  if (globalOpencodeRoot && isPluginRegisteredInOpencodeRoot(globalOpencodeRoot)) {
+    return join(globalOpencodeRoot, "plugins", "oc-evolver.ts")
+  }
+
+  return localPluginFilePath
 }
 
 function resolveExplicitPluginFilePath(pluginEntryPointPath: string) {
   return resolve(pluginEntryPointPath)
+}
+
+function resolveGlobalOpencodeRoot() {
+  const configHome = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config")
+
+  return join(configHome, "opencode")
+}
+
+function isPluginRegisteredInOpencodeRoot(opencodeRoot: string) {
+  for (const configFileName of CONFIG_FILE_NAMES) {
+    const configPath = join(opencodeRoot, configFileName)
+
+    if (!existsSync(configPath)) {
+      continue
+    }
+
+    const configText = readFileSync(configPath, "utf8")
+
+    if (CONFIG_PLUGIN_HINTS.some((hint) => configText.includes(hint))) {
+      return true
+    }
+  }
+
+  return false
 }
 
 function getPermissionPatterns(permission: PermissionRequest) {
