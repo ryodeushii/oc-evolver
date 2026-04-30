@@ -8,3 +8,14 @@ export type OCEvolverRuntimeContract = {
   skillDir: string
   commandDir: string
 }
+
+export type OCEvolverKernelPaths = {
+  pluginFilePath: string
+  opencodeRoot: string
+  pluginRoot: string
+  registryRoot: string
+  skillsRoot: string
+  agentsRoot: string
+  commandsRoot: string
+  protectedFiles: string[]
+}
