@@ -69,6 +69,14 @@ describe("plugin tool surface", () => {
     expect(entrypoint.OCEvolverPlugin).toBe(OCEvolverPlugin)
   })
 
+  test("package ships the runtime contract needed by the server entrypoint", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../../package.json", import.meta.url), "utf8"),
+    ) as { files?: string[] }
+
+    expect(packageJson.files).toContain("eval/runtime-contract.json")
+  })
+
   test("uses the bridge plugin path for global runtime roots", async () => {
     const projectRoot = join(workspaceRoot, "project")
     const globalOpencodeRoot = join(workspaceRoot, "global-opencode")
