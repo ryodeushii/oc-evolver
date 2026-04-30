@@ -164,4 +164,39 @@ describe("evaluation harness", () => {
     expect(registryJson.currentRevision).toBe("rev-1")
     expect(registryJson.skills).toHaveProperty("fixture-refactor")
   })
+
+  test("runEvaluationScenario skips walking ignored install-noise directories", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/noise.md"),
+      "Exercise harness diffing without reading ignored install-noise files.\n",
+    )
+
+    const result = await runEvaluationScenario({
+      repoRoot,
+      scenarioName: "noise",
+      timestamp: "2026-04-30T12-05-00.000Z",
+      executeCommand: async ({ workspaceRoot }) => {
+        await mkdir(join(workspaceRoot, ".opencode/node_modules/huge-package"), {
+          recursive: true,
+        })
+        await writeFile(
+          join(workspaceRoot, ".opencode/node_modules/huge-package/index.js"),
+          "console.log('ignored')\n",
+        )
+        await writeFile(join(workspaceRoot, "README.md"), "NOTE: changed\n")
+
+        return {
+          stdout: '{"type":"text","text":"noise ok"}',
+          stderr: "",
+          exitCode: 0,
+        } satisfies EvalCommandResult
+      },
+    })
+
+    const resultJson = JSON.parse(
+      await readFile(join(result.resultDir, "result.json"), "utf8"),
+    ) as { changedFiles: string[] }
+
+    expect(resultJson.changedFiles).toEqual(["README.md"])
+  })
 })

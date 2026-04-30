@@ -27,6 +27,7 @@ describe("registry transactions", () => {
         skills: {},
         agents: {},
         commands: {},
+        quarantine: {},
         currentRevision: null,
       }, null, 2),
     )
@@ -41,6 +42,7 @@ describe("registry transactions", () => {
       skills: {},
       agents: {},
       commands: {},
+      quarantine: {},
       currentRevision: null,
     })
   })

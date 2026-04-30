@@ -84,18 +84,17 @@ export async function runAgentInSession(input: {
 
   const agentPath = join(kernelPaths.agentsRoot, `${input.agentName}.md`)
   const agentDocument = parseAgentDocument(await readFile(agentPath, "utf8"))
-  const promptText = [
-    `Run agent: ${input.agentName}`,
-    "Agent instructions:",
-    agentDocument.body,
-    "User prompt:",
-    input.prompt,
-  ].join("\n\n")
+  const promptText = input.prompt
 
   await input.client.session.prompt({
     path: { id: input.sessionID },
     body: {
-      noReply: false,
+      noReply: true,
+      system: [
+        `Run agent: ${input.agentName}`,
+        "Agent instructions:",
+        agentDocument.body,
+      ].join("\n\n"),
       parts: [{ type: "text", text: promptText }],
     },
   })

@@ -196,7 +196,7 @@ Review markdown changes before they land.
     expect(promptCalls[0]).toMatchObject({
       path: { id: "session-2" },
       body: {
-        noReply: false,
+        noReply: true,
       },
     })
     expect(JSON.stringify(promptCalls[0])).toContain("fixture-reviewer")

@@ -35,12 +35,21 @@ type EvaluationResult = {
   changedFiles: string[]
 }
 
+type EvaluationTurn = {
+  turnNumber: number
+  prompt: string
+  command: string[]
+  exitCode: number
+  sessionID: string | null
+}
+
 const DEFAULT_SCENARIOS = [
   "smoke",
   "create-skill",
   "create-agent",
   "reuse-skill",
   "policy-deny",
+  "invalid-artifact",
 ]
 
 const IGNORED_CHANGED_FILE_PREFIXES = [".opencode/node_modules/"]
@@ -60,6 +69,7 @@ export async function runEvaluationScenario(input: {
   const baseFixtureRoot = join(input.repoRoot, "eval/fixtures/base")
   const scenarioPath = join(input.repoRoot, "eval/scenarios", `${input.scenarioName}.md`)
   const prompt = await readFile(scenarioPath, "utf8")
+  const prompts = parseScenarioPrompts(prompt)
 
   await syncPluginIntoFixture({ repoRoot: input.repoRoot })
 
@@ -67,47 +77,81 @@ export async function runEvaluationScenario(input: {
   const workspaceRoot = join(workspaceParent, "workspace")
 
   await cp(baseFixtureRoot, workspaceRoot, { recursive: true })
+  await seedScenarioWorkspace(input.scenarioName, workspaceRoot)
 
   const timestamp = input.timestamp ?? new Date().toISOString().replaceAll(":", "-")
   const resultDir = join(input.repoRoot, "eval/results", input.scenarioName, timestamp)
-  const command = [
-    "opencode",
-    "run",
-    "--format",
-    "json",
-    "--dir",
-    workspaceRoot,
-    "--dangerously-skip-permissions",
-    prompt,
-  ]
-  const execution = await executeCommand({
-    workspaceRoot,
-    prompt,
-    command,
-  })
+  const turns: EvaluationTurn[] = []
+  const parsedResponses: unknown[] = []
+  let combinedStdout = ""
+  let combinedStderr = ""
+  let exitCode = 0
+  let sessionID: string | null = null
+
+  for (const [index, turnPrompt] of prompts.entries()) {
+    const command = buildOpencodeRunCommand({
+      workspaceRoot,
+      prompt: turnPrompt,
+      sessionID,
+    })
+    const execution = await executeCommand({
+      workspaceRoot,
+      prompt: turnPrompt,
+      command,
+    })
+    const parsedResponse = parseOpencodeJsonStream(execution.stdout)
+    const nextSessionID: string | null = extractSessionID(parsedResponse) ?? sessionID
+
+    if (index > 0 && !nextSessionID) {
+      throw new Error(`scenario ${input.scenarioName} lost the continued session id at turn ${index + 1}`)
+    }
+
+    turns.push({
+      turnNumber: index + 1,
+      prompt: turnPrompt,
+      command,
+      exitCode: execution.exitCode,
+      sessionID: nextSessionID,
+    })
+
+    if (Array.isArray(parsedResponse)) {
+      parsedResponses.push(...parsedResponse)
+    } else {
+      parsedResponses.push(parsedResponse)
+    }
+
+    combinedStdout += execution.stdout
+    combinedStderr += execution.stderr
+    exitCode = execution.exitCode
+    sessionID = nextSessionID
+
+    if (execution.exitCode !== 0) {
+      break
+    }
+  }
+
   const changedFiles = await diffDirectories(baseFixtureRoot, workspaceRoot)
 
   await mkdir(resultDir, { recursive: true })
-  await writeFile(join(resultDir, "stdout.txt"), execution.stdout)
-  await writeFile(join(resultDir, "stderr.txt"), execution.stderr)
+  await writeFile(join(resultDir, "stdout.txt"), combinedStdout)
+  await writeFile(join(resultDir, "stderr.txt"), combinedStderr)
   await writeFile(
     join(resultDir, "result.json"),
     `${JSON.stringify(
       {
         scenarioName: input.scenarioName,
         workspaceRoot,
-        exitCode: execution.exitCode,
-        command,
+        exitCode,
+        command: turns.at(-1)?.command ?? [],
         changedFiles,
+        turnCount: turns.length,
       },
       null,
       2,
     )}\n`,
   )
-
-  const parsedResponse = parseOpencodeJsonStream(execution.stdout)
-
-  await writeFile(join(resultDir, "response.json"), `${JSON.stringify(parsedResponse, null, 2)}\n`)
+  await writeFile(join(resultDir, "response.json"), `${JSON.stringify(parsedResponses, null, 2)}\n`)
+  await writeFile(join(resultDir, "turns.json"), `${JSON.stringify(turns, null, 2)}\n`)
 
   const auditSourcePath = join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson")
   const registrySourcePath = join(workspaceRoot, ".opencode/oc-evolver/registry.json")
@@ -126,15 +170,41 @@ export async function runEvaluationScenario(input: {
     await writeFile(join(resultDir, "registry.json"), "{}\n")
   }
 
+  await assertProtectedPluginFileUnchanged(baseFixtureRoot, workspaceRoot)
+
   return {
     scenarioName: input.scenarioName,
     resultDir,
     workspaceRoot,
-    stdout: execution.stdout,
-    stderr: execution.stderr,
-    exitCode: execution.exitCode,
+    stdout: combinedStdout,
+    stderr: combinedStderr,
+    exitCode,
     changedFiles,
   }
+}
+
+function buildOpencodeRunCommand(input: {
+  workspaceRoot: string
+  prompt: string
+  sessionID: string | null
+}) {
+  const command = [
+    "opencode",
+    "run",
+    "--format",
+    "json",
+    "--dir",
+    input.workspaceRoot,
+    "--dangerously-skip-permissions",
+  ]
+
+  if (input.sessionID) {
+    command.push("--session", input.sessionID)
+  }
+
+  command.push(input.prompt)
+
+  return command
 }
 
 async function executeOpencodeRun(input: {
@@ -203,7 +273,7 @@ async function diffDirectories(baseRoot: string, candidateRoot: string) {
 async function collectFileMap(rootPath: string) {
   const fileMap = new Map<string, string>()
 
-  await walkDirectory(rootPath, async (filePath) => {
+  await walkDirectory(rootPath, rootPath, async (filePath) => {
     fileMap.set(relative(rootPath, filePath).replaceAll("\\", "/"), await readFile(filePath, "utf8"))
   })
 
@@ -232,6 +302,68 @@ function parseOpencodeJsonStream(stdout: string) {
   return events
 }
 
+function extractSessionID(parsedResponse: unknown) {
+  if (!Array.isArray(parsedResponse)) {
+    return null
+  }
+
+  for (const event of parsedResponse) {
+    if (
+      typeof event === "object" &&
+      event !== null &&
+      "sessionID" in event &&
+      typeof event.sessionID === "string"
+    ) {
+      return event.sessionID
+    }
+  }
+
+  return null
+}
+
+function parseScenarioPrompts(promptDocument: string) {
+  return promptDocument
+    .split(/^\s*---\s*$/m)
+    .map((prompt) => prompt.trim())
+    .filter((prompt) => prompt.length > 0)
+}
+
+async function seedScenarioWorkspace(scenarioName: string, workspaceRoot: string) {
+  if (scenarioName !== "invalid-artifact") {
+    return
+  }
+
+  const brokenSkillRoot = join(workspaceRoot, ".opencode/skills/broken-skill")
+
+  await mkdir(brokenSkillRoot, { recursive: true })
+  await writeFile(
+    join(brokenSkillRoot, "SKILL.md"),
+    [
+      "---",
+      "name: broken-skill",
+      "---",
+      "",
+      "This skill is intentionally invalid for evaluation.",
+      "",
+    ].join("\n"),
+  )
+}
+
+async function assertProtectedPluginFileUnchanged(baseFixtureRoot: string, workspaceRoot: string) {
+  const protectedRelativePath = ".opencode/plugins/oc-evolver.ts"
+  const basePluginPath = join(baseFixtureRoot, protectedRelativePath)
+  const workspacePluginPath = join(workspaceRoot, protectedRelativePath)
+
+  const [basePlugin, workspacePlugin] = await Promise.all([
+    readFile(basePluginPath, "utf8"),
+    readFile(workspacePluginPath, "utf8"),
+  ])
+
+  if (basePlugin !== workspacePlugin) {
+    throw new Error("protected plugin file changed during evaluation")
+  }
+}
+
 function shouldIgnoreChangedFile(relativePath: string) {
   if (IGNORED_CHANGED_FILES.has(relativePath)) {
     return true
@@ -241,6 +373,7 @@ function shouldIgnoreChangedFile(relativePath: string) {
 }
 
 async function walkDirectory(
+  rootPath: string,
   currentPath: string,
   onFile: (filePath: string) => Promise<void>,
 ): Promise<void> {
@@ -248,9 +381,14 @@ async function walkDirectory(
 
   for (const entry of entries) {
     const entryPath = join(currentPath, entry.name)
+    const entryRelativePath = relative(rootPath, entryPath).replaceAll("\\", "/")
+
+    if (shouldSkipWalkPath(entryRelativePath, entry.isDirectory())) {
+      continue
+    }
 
     if (entry.isDirectory()) {
-      await walkDirectory(entryPath, onFile)
+      await walkDirectory(rootPath, entryPath, onFile)
       continue
     }
 
@@ -262,13 +400,27 @@ async function walkDirectory(
     const entryStats = await stat(entryPath)
 
     if (entryStats.isDirectory()) {
-      await walkDirectory(entryPath, onFile)
+      if (!shouldSkipWalkPath(entryRelativePath, true)) {
+        await walkDirectory(rootPath, entryPath, onFile)
+      }
     }
 
     if (entryStats.isFile()) {
       await onFile(entryPath)
     }
   }
+}
+
+function shouldSkipWalkPath(relativePath: string, isDirectory: boolean) {
+  if (IGNORED_CHANGED_FILES.has(relativePath)) {
+    return true
+  }
+
+  return IGNORED_CHANGED_FILE_PREFIXES.some((prefix) => {
+    const normalizedPrefix = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix
+
+    return relativePath === normalizedPrefix || relativePath.startsWith(prefix)
+  })
 }
 
 async function main() {

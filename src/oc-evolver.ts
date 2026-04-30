@@ -1,17 +1,22 @@
 import { existsSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 
 import { tool, type Plugin } from "@opencode-ai/plugin"
 
 import runtimeContract from "../eval/runtime-contract.json"
-import { appendAuditEvent } from "./kernel/audit.ts"
+import { appendAuditEvent, recordPolicyDeniedEvent } from "./kernel/audit.ts"
 import {
   applySkillToSession,
   rollbackRevision,
   runAgentInSession,
 } from "./kernel/agent-runtime.ts"
 import { resolveKernelPaths } from "./kernel/paths.ts"
-import { loadRegistry, applyMutationTransaction } from "./kernel/registry.ts"
+import { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
+import {
+  loadRegistry,
+  applyMutationTransaction,
+  validateRegistryArtifacts,
+} from "./kernel/registry.ts"
 import {
   parseAgentDocument,
   parseCommandDocument,
@@ -20,8 +25,53 @@ import {
 
 export { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 
+type PermissionRequest = {
+  type: string
+  pattern?: string | string[]
+}
+
+const MUTATING_PERMISSION_TYPES = new Set(["create", "delete", "edit", "move", "write"])
+
+function resolvePluginFilePath(ctx: { directory: string; worktree: string }) {
+  return join(ctx.directory, runtimeContract.pluginDir, "oc-evolver.ts")
+}
+
+function getPermissionPatterns(permission: PermissionRequest) {
+  if (!permission.pattern) {
+    return []
+  }
+
+  return Array.isArray(permission.pattern) ? permission.pattern : [permission.pattern]
+}
+
+function isMutatingPermission(permission: PermissionRequest) {
+  return MUTATING_PERMISSION_TYPES.has(permission.type)
+}
+
+function extractPatchTargetPaths(patchText: string) {
+  const targets: string[] = []
+
+  for (const line of patchText.split("\n")) {
+    if (line.startsWith("*** Update File: ")) {
+      targets.push(line.slice("*** Update File: ".length).trim())
+      continue
+    }
+
+    if (line.startsWith("*** Add File: ")) {
+      targets.push(line.slice("*** Add File: ".length).trim())
+      continue
+    }
+
+    if (line.startsWith("*** Delete File: ")) {
+      targets.push(line.slice("*** Delete File: ".length).trim())
+    }
+  }
+
+  return targets
+}
+
 export const OCEvolverPlugin: Plugin = async (ctx) => {
-  const pluginFilePath = join(ctx.worktree, runtimeContract.pluginDir, "oc-evolver.ts")
+  const pluginFilePath = resolvePluginFilePath(ctx)
 
   return {
     tool: {
@@ -36,10 +86,21 @@ export const OCEvolverPlugin: Plugin = async (ctx) => {
       evolver_validate: tool({
         description: "Validate a mutable artifact",
         args: {
-          kind: tool.schema.enum(["skill", "agent", "command"]),
-          document: tool.schema.string(),
+          scope: tool.schema.enum(["document", "registry"]).optional(),
+          kind: tool.schema.enum(["skill", "agent", "command"]).optional(),
+          document: tool.schema.string().optional(),
         },
         async execute(args) {
+          if (args.scope === "registry") {
+            const result = await validateRegistryArtifacts(pluginFilePath, runtimeContract)
+
+            return JSON.stringify({ invalid: result.invalid }, null, 2)
+          }
+
+          if (!args.kind || !args.document) {
+            throw new Error("document validation requires kind and document")
+          }
+
           if (args.kind === "skill") {
             parseSkillDocument(args.document)
           }
@@ -187,6 +248,65 @@ export const OCEvolverPlugin: Plugin = async (ctx) => {
 
       if (!existsSync(kernelPaths.registryRoot)) {
         return
+      }
+    },
+    "permission.ask": async (permission, output) => {
+      if (!isMutatingPermission(permission)) {
+        return
+      }
+
+      for (const pattern of getPermissionPatterns(permission)) {
+        const candidatePath = resolve(ctx.directory, pattern)
+
+        try {
+          await ensureAutonomousPathAllowed(pluginFilePath, runtimeContract, candidatePath)
+        } catch (error) {
+          output.status = "deny"
+
+          await recordPolicyDeniedEvent({
+            pluginFilePath,
+            runtimeContract,
+            target: pattern,
+            detail: error instanceof Error ? error.message : String(error),
+          })
+
+          return
+        }
+      }
+    },
+    "tool.execute.before": async (input, output) => {
+      if (input.tool !== "apply_patch") {
+        return
+      }
+
+      const patchText =
+        typeof output.args?.patchText === "string"
+          ? output.args.patchText
+          : typeof output.args?.patch === "string"
+            ? output.args.patch
+            : null
+
+      if (!patchText) {
+        return
+      }
+
+      for (const targetPath of extractPatchTargetPaths(patchText)) {
+        try {
+          await ensureAutonomousPathAllowed(
+            pluginFilePath,
+            runtimeContract,
+            resolve(ctx.directory, targetPath),
+          )
+        } catch (error) {
+          await recordPolicyDeniedEvent({
+            pluginFilePath,
+            runtimeContract,
+            target: targetPath,
+            detail: error instanceof Error ? error.message : String(error),
+          })
+
+          throw error
+        }
       }
     },
   }
