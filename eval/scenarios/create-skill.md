@@ -1,1 +1,1 @@
-Use oc-evolver to create a skill named `fixture-refactor` with `SKILL.md` and a Python helper script that rewrites `TODO` to `NOTE` in markdown files.
+Use oc-evolver to create a skill named `fixture-refactor` with `SKILL.md` and a Python helper script that rewrites `TODO` to `NOTE` in markdown files. Save the helper at `scripts/rewrite_todo_to_note.py` inside the skill bundle.

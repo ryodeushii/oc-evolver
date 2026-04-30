@@ -396,7 +396,11 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
         }
       },
       "tool.execute.before": async (input, output) => {
-        const sessionStorageMode = getSessionStorageMode(input.sessionID)
+        const sessionStorageMode = await getSessionStorageMode({
+          pluginFilePath,
+          runtimeContract,
+          sessionID: input.sessionID,
+        })
 
         if (
           sessionStorageMode === "artifact-only" &&

@@ -199,4 +199,422 @@ describe("evaluation harness", () => {
 
     expect(resultJson.changedFiles).toEqual(["README.md"])
   })
+  test("runEvaluationScenario rejects create-skill artifacts that miss the canonical helper path", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/create-skill.md"),
+      "Create the fixture skill and helper.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "create-skill",
+        timestamp: "2026-04-30T12-10-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/skills/fixture-refactor"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/skills/fixture-refactor/SKILL.md"),
+            "---\nname: fixture-refactor\ndescription: Rewrite TODO markers\n---\n\nUse the helper.\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/skills/fixture-refactor/fixture_refactor.py"),
+            "print('rewrite')\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            '{"action":"write_skill","status":"success"}\n',
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify(
+              {
+                skills: {
+                  "fixture-refactor": {
+                    kind: "skill",
+                    name: "fixture-refactor",
+                    nativePath: ".opencode/skills/fixture-refactor/SKILL.md",
+                    helperPaths: [".opencode/skills/fixture-refactor/fixture_refactor.py"],
+                    revisionID: "rev-skill",
+                    contentHash: "a".repeat(64),
+                  },
+                },
+                agents: {},
+                commands: {},
+                quarantine: {},
+                currentRevision: "rev-skill",
+              },
+              null,
+              2,
+            ),
+          )
+
+          return {
+            stdout: '{"type":"text","text":"created skill"}',
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/rewrite_todo_to_note.py/i)
+  })
+
+  test("runEvaluationScenario rejects create-skill artifacts without a write_skill audit event", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/create-skill.md"),
+      "Create the fixture skill and helper.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "create-skill",
+        timestamp: "2026-04-30T12-11-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/skills/fixture-refactor/scripts"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/skills/fixture-refactor/SKILL.md"),
+            "---\nname: fixture-refactor\ndescription: Rewrite TODO markers\n---\n\nUse the helper.\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/skills/fixture-refactor/scripts/rewrite_todo_to_note.py"),
+            "print('rewrite')\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            '{"action":"write_memory","status":"success"}\n',
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify({
+              skills: {
+                "fixture-refactor": {
+                  kind: "skill",
+                  name: "fixture-refactor",
+                  nativePath: ".opencode/skills/fixture-refactor/SKILL.md",
+                  helperPaths: [".opencode/skills/fixture-refactor/scripts/rewrite_todo_to_note.py"],
+                  revisionID: "rev-skill",
+                  contentHash: "a".repeat(64),
+                },
+              },
+              agents: {},
+              commands: {},
+              quarantine: {},
+              currentRevision: "rev-skill",
+            }, null, 2),
+          )
+
+          return { stdout: '{"type":"text","text":"created skill"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/write_skill/i)
+  })
+
+  test("runEvaluationScenario rejects memory-guided-write artifacts that create repo-local markdown notes", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/memory-guided-write.md"),
+      "Create a routing memory profile.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "memory-guided-write",
+        timestamp: "2026-04-30T12-12-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/memory/research-routing.md"),
+            "---\nname: research-routing\ndescription: Route durable notes\nstorage_mode: memory-and-artifact\n---\n",
+          )
+          await writeFile(join(workspaceRoot, "policy.md"), "do not commit\n")
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            '{"action":"write_memory","status":"success"}\n',
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify({
+              skills: {},
+              agents: {},
+              commands: {},
+              memories: {
+                "research-routing": {
+                  kind: "memory",
+                  name: "research-routing",
+                  nativePath: ".opencode/memory/research-routing.md",
+                  revisionID: "rev-memory",
+                  contentHash: "b".repeat(64),
+                },
+              },
+              quarantine: {},
+              currentRevision: "rev-memory",
+            }, null, 2),
+          )
+
+          return { stdout: '{"type":"text","text":"created memory"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/repo-local markdown/i)
+  })
+
+  test("runEvaluationScenario rejects artifact-only-deny artifacts without a policy_denied audit event", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/artifact-only-deny.md"),
+      "Apply artifact-only memory and attempt a blocked write.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "artifact-only-deny",
+        timestamp: "2026-04-30T12-13-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver/sessions"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/memory/artifact-only-session.md"),
+            "---\nname: artifact-only-session\ndescription: artifact only\nstorage_mode: artifact-only\n---\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/sessions/session-1.json"),
+            JSON.stringify({ memories: { "artifact-only-session": { storageMode: "artifact-only" } } }, null, 2),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            [
+              '{"action":"write_memory","status":"success"}',
+              '{"action":"apply_memory","status":"success"}',
+            ].join("\n") + "\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-artifact" }, null, 2),
+          )
+
+          return { stdout: '{"type":"text","text":"denied write"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/policy_denied/i)
+  })
+
+  test("runEvaluationScenario rejects rollback artifacts when the command file is not restored", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/rollback.md"),
+      "Create two command revisions and roll back.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "rollback",
+        timestamp: "2026-04-30T12-14-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/commands/review-markdown.md"),
+            "---\ndescription: Second review flow\n---\n\nReview README.md twice.\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            '{"action":"rollback","status":"success"}\n',
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-first" }, null, 2),
+          )
+
+          return { stdout: '{"type":"text","text":"rolled back"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/restored|first command body/i)
+  })
+
+
+  test("runEvaluationScenario accepts artifact-only-deny artifacts when policy_denied is recorded as a failure", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/artifact-only-deny.md"),
+      "Apply artifact-only memory and attempt a blocked write.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "artifact-only-deny",
+        timestamp: "2026-04-30T12-13-30.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver/sessions"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/memory/artifact-only-session.md"),
+            "---\nname: artifact-only-session\ndescription: artifact only\nstorage_mode: artifact-only\n---\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/sessions/session-1.json"),
+            JSON.stringify({ memories: { "artifact-only-session": { storageMode: "artifact-only" } } }, null, 2),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            [
+              '{"action":"write_memory","status":"success"}',
+              '{"action":"apply_memory","status":"success"}',
+              '{"action":"policy_denied","status":"failure","failureClass":"policy_denied"}',
+            ].join("\n") + "\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-artifact" }, null, 2),
+          )
+
+          return { stdout: '{"type":"text","text":"denied write"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
+        },
+      }),
+    ).resolves.toMatchObject({ scenarioName: "artifact-only-deny", exitCode: 0 })
+  })
+
+  test("runEvaluationScenario rejects artifact-only-deny artifacts without an apply_memory audit event", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/artifact-only-deny.md"),
+      "Apply artifact-only memory and attempt a blocked write.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "artifact-only-deny",
+        timestamp: "2026-04-30T12-13-40.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver/sessions"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/memory/artifact-only-session.md"),
+            "---\nname: artifact-only-session\ndescription: artifact only\nstorage_mode: artifact-only\n---\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/sessions/session-1.json"),
+            JSON.stringify({ memories: { "artifact-only-session": { storageMode: "artifact-only" } } }, null, 2),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            [
+              '{"action":"write_memory","status":"success"}',
+              '{"action":"policy_denied","status":"failure","failureClass":"policy_denied"}',
+            ].join("\n") + "\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-artifact" }, null, 2),
+          )
+
+          return { stdout: '{"type":"text","text":"denied write"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/apply_memory/i)
+  })
+
+  test("runEvaluationScenario rejects memory-guided-write artifacts without a registry memory entry", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/memory-guided-write.md"),
+      "Create a routing memory profile.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "memory-guided-write",
+        timestamp: "2026-04-30T12-12-30.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/memory/research-routing.md"),
+            "---\nname: research-routing\ndescription: Route durable notes\nstorage_mode: memory-and-artifact\n---\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            '{"action":"write_memory","status":"success"}\n',
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-memory" }, null, 2),
+          )
+
+          return { stdout: '{"type":"text","text":"created memory"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/research-routing/i)
+  })
+
+  test("runEvaluationScenario rejects rollback artifacts when registry currentRevision is not restored", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/rollback.md"),
+      "Create two command revisions and roll back.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "rollback",
+        timestamp: "2026-04-30T12-14-30.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/commands/review-markdown.md"),
+            "---\ndescription: First review flow\n---\n\nReview README.md once.\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            '{"action":"rollback","status":"success"}\n',
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-second" }, null, 2),
+          )
+
+          return { stdout: '{"type":"text","text":"rolled back"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/currentRevision|restored revision/i)
+  })
+
+
+  test("runEvaluationScenario accepts rollback artifacts when currentRevision matches the restored revision id", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/rollback.md"),
+      "Create two command revisions and roll back.\n",
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "rollback",
+        timestamp: "2026-04-30T12-14-40.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/commands/review-markdown.md"),
+            "---\ndescription: First review flow\n---\n\nReview README.md once.\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            '{"action":"rollback","status":"success","revisionID":"restored-rev","rolledBackRevisionID":"replaced-rev"}\n',
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "restored-rev" }, null, 2),
+          )
+
+          return { stdout: '{"type":"text","text":"rolled back"}', stderr: "", exitCode: 0 } satisfies EvalCommandResult
+        },
+      }),
+    ).resolves.toMatchObject({ scenarioName: "rollback", exitCode: 0 })
+  })
+
 })
