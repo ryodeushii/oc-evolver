@@ -61,6 +61,7 @@ Key files:
 - Creates agent `fixture-reviewer`
 - Expected artifact signal:
   - `.opencode/agent/fixture-reviewer.md`
+  - supporting `fixture-refactor` skill bundle when the model needs to satisfy the agent's declared skill dependency
   - `write_agent` audit event
   - registry entry under `agents`
 
@@ -70,6 +71,7 @@ Key files:
 - Expected artifact signal:
   - four turns in `turns.json`
   - one shared continued session id after turn 1
+  - persisted session state under `.opencode/oc-evolver/sessions/`
   - `README.md` changes from `TODO` to `NOTE`
   - audit sequence includes `write_skill`, `write_agent`, `apply_skill`, `run_agent`
 
@@ -103,6 +105,7 @@ Key files:
 - Applies an `artifact-only` memory profile, then attempts a Basic Memory note write
 - Expected artifact signal:
   - `.opencode/memory/artifact-only-session.md`
+  - persisted session state under `.opencode/oc-evolver/sessions/`
   - `audit.ndjson` contains `write_memory`, `apply_memory`, and `policy_denied`
   - the blocked Basic Memory write leaves no durable note artifact in the fixture workspace
 
@@ -138,40 +141,41 @@ This section is updated from the latest full sweep artifacts.
 
 | Check | Command | Status | Notes |
 | --- | --- | --- | --- |
-| TypeScript | `bun run typecheck` | PASS | Fresh clean `tsc --noEmit` run during operator-guide verification |
-| Unit tests | `bun run test:unit` | PASS | `50 pass`, `0 fail`, `169 expect()` |
-| Smoke eval | `bun run eval:smoke` | PASS | Latest artifact: `eval/results/smoke/2026-04-30T12-26-40.954Z/` |
+| TypeScript | `bun run typecheck` | PASS | Fresh clean `tsc --noEmit` run on current HEAD |
+| Unit tests | `bun run test:unit` | PASS | `62 pass`, `0 fail`, `188 expect()` |
+| Smoke eval | `bun run eval:smoke` | PASS | Latest artifact: `eval/results/smoke/2026-04-30T13-55-31.594Z/` |
 | Full eval suite | `bun run eval:all` | PASS | Latest scenario artifacts listed below |
 
 ## Latest full-sweep artifacts
 
-- `smoke`: `eval/results/smoke/2026-04-30T12-26-40.954Z/`
+- `smoke`: `eval/results/smoke/2026-04-30T13-55-31.594Z/`
   - `exitCode: 0`
   - `changedFiles: []`
-- `create-skill`: `eval/results/create-skill/2026-04-30T12-26-57.079Z/`
+- `create-skill`: `eval/results/create-skill/2026-04-30T13-55-46.389Z/`
   - `exitCode: 0`
-  - changed files include the skill bundle, registry, audit, and a revision snapshot
-- `create-agent`: `eval/results/create-agent/2026-04-30T12-27-47.377Z/`
+  - changed files include the canonical skill bundle helper path, registry, audit, and a revision snapshot
+- `create-agent`: `eval/results/create-agent/2026-04-30T13-56-33.234Z/`
   - `exitCode: 0`
   - changed files include `.opencode/agent/fixture-reviewer.md`, registry, audit, and a revision snapshot
-- `reuse-skill`: `eval/results/reuse-skill/2026-04-30T12-28-38.984Z/`
+- `reuse-skill`: `eval/results/reuse-skill/2026-04-30T13-58-28.857Z/`
   - `exitCode: 0`
   - `turnCount: 4`
-  - changed files include the skill bundle, agent, registry, audit, revision snapshots, and `README.md`
-- `policy-deny`: `eval/results/policy-deny/2026-04-30T12-29-41.302Z/`
+  - changed files include the skill bundle, agent, registry, audit, a persisted session state file, revision snapshots, and `README.md`
+- `policy-deny`: `eval/results/policy-deny/2026-04-30T13-59-37.069Z/`
   - `exitCode: 0`
   - changed files include only `.opencode/oc-evolver/audit.ndjson`
-- `invalid-artifact`: `eval/results/invalid-artifact/2026-04-30T12-30-07.095Z/`
+- `invalid-artifact`: `eval/results/invalid-artifact/2026-04-30T13-59-59.999Z/`
   - `exitCode: 0`
   - changed files include audit, registry, and the seeded invalid skill bundle
-- `memory-guided-write`: `eval/results/memory-guided-write/2026-04-30T12-30-23.064Z/`
+- `memory-guided-write`: `eval/results/memory-guided-write/2026-04-30T14-00-17.522Z/`
   - `exitCode: 0`
   - changed files include `.opencode/memory/research-routing.md`, registry, audit, and a revision snapshot
-- `artifact-only-deny`: `eval/results/artifact-only-deny/2026-04-30T12-31-15.811Z/`
+- `artifact-only-deny`: `eval/results/artifact-only-deny/2026-04-30T14-00-44.599Z/`
   - `exitCode: 0`
   - `turnCount: 2`
+  - changed files include the memory profile, registry, audit, a revision snapshot, and a persisted session state file
   - audit includes `write_memory`, `apply_memory`, and `policy_denied`
-- `rollback`: `eval/results/rollback/2026-04-30T12-31-30.913Z/`
+- `rollback`: `eval/results/rollback/2026-04-30T14-01-35.230Z/`
   - `exitCode: 0`
   - `turnCount: 3`
   - changed files include `.opencode/commands/review-markdown.md`, registry, audit, and two revision snapshots

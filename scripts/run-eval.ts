@@ -362,30 +362,144 @@ async function assertScenarioArtifacts(input: {
   workspaceRoot: string
   changedFiles: string[]
 }) {
-  if (input.scenarioName !== "create-skill") {
-    return
+  const auditEvents = await readAuditEvents(input.workspaceRoot)
+  const registry = await readRegistry(input.workspaceRoot)
+
+  switch (input.scenarioName) {
+    case "create-skill": {
+      const canonicalHelperPath = ".opencode/skills/fixture-refactor/scripts/rewrite_todo_to_note.py"
+
+      if (!input.changedFiles.includes(canonicalHelperPath)) {
+        throw new Error(
+          `scenario create-skill missing canonical helper artifact: ${canonicalHelperPath}`,
+        )
+      }
+
+      const helperPaths = registry.skills?.["fixture-refactor"]?.helperPaths
+
+      if (!Array.isArray(helperPaths) || !helperPaths.includes(canonicalHelperPath)) {
+        throw new Error(
+          `scenario create-skill registry missing canonical helper path: ${canonicalHelperPath}`,
+        )
+      }
+
+      assertAuditAction(auditEvents, "write_skill", "scenario create-skill missing write_skill audit event")
+      return
+    }
+    case "memory-guided-write": {
+      assertAuditAction(auditEvents, "write_memory", "scenario memory-guided-write missing write_memory audit event")
+
+      if (!registry.memories?.["research-routing"]) {
+        throw new Error("scenario memory-guided-write registry missing research-routing memory entry")
+      }
+
+      const repoLocalMarkdown = input.changedFiles.filter(
+        (relativePath) => relativePath.endsWith(".md") && !relativePath.startsWith(".opencode/"),
+      )
+
+      if (repoLocalMarkdown.length > 0) {
+        throw new Error(
+          `scenario memory-guided-write created repo-local markdown: ${repoLocalMarkdown.join(", ")}`,
+        )
+      }
+
+      return
+    }
+    case "artifact-only-deny": {
+      assertAuditAction(auditEvents, "write_memory", "scenario artifact-only-deny missing write_memory audit event")
+      assertAuditAction(auditEvents, "apply_memory", "scenario artifact-only-deny missing apply_memory audit event")
+      assertAuditAction(
+        auditEvents,
+        "policy_denied",
+        "scenario artifact-only-deny missing policy_denied audit event",
+        "failure",
+      )
+
+      if (
+        !input.changedFiles.some(
+          (relativePath) =>
+            relativePath.startsWith(".opencode/oc-evolver/sessions/") &&
+            relativePath.endsWith(".json"),
+        )
+      ) {
+        throw new Error("scenario artifact-only-deny missing persisted session state artifact")
+      }
+
+      const repoLocalMarkdown = input.changedFiles.filter(
+        (relativePath) => relativePath.endsWith(".md") && !relativePath.startsWith(".opencode/"),
+      )
+
+      if (repoLocalMarkdown.length > 0) {
+        throw new Error(
+          `scenario artifact-only-deny created unexpected durable markdown: ${repoLocalMarkdown.join(", ")}`,
+        )
+      }
+
+      return
+    }
+    case "rollback": {
+      assertAuditAction(auditEvents, "rollback", "scenario rollback missing rollback audit event")
+      const commandDocument = await readFile(
+        join(input.workspaceRoot, ".opencode/commands/review-markdown.md"),
+        "utf8",
+      )
+
+      if (
+        !commandDocument.includes("First review flow") ||
+        !commandDocument.includes("Review README.md once.")
+      ) {
+        throw new Error("scenario rollback did not restore the first command body")
+      }
+
+      const rollbackEvent = auditEvents.find((event) => event.action === "rollback" && event.status === "success")
+
+      if (!rollbackEvent?.revisionID) {
+        throw new Error("scenario rollback missing restored revision id in audit")
+      }
+
+      if (registry.currentRevision !== rollbackEvent.revisionID) {
+        throw new Error("scenario rollback registry currentRevision did not point at the restored revision")
+      }
+
+      return
+    }
+    default:
+      return
   }
+}
 
-  const canonicalHelperPath = ".opencode/skills/fixture-refactor/scripts/rewrite_todo_to_note.py"
+async function readAuditEvents(workspaceRoot: string) {
+  try {
+    const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
 
-  if (!input.changedFiles.includes(canonicalHelperPath)) {
-    throw new Error(
-      `scenario create-skill missing canonical helper artifact: ${canonicalHelperPath}`,
-    )
+    return auditLog
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { action?: string; status?: string; revisionID?: string })
+  } catch {
+    return []
   }
+}
 
-  const registry = JSON.parse(
-    await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
+async function readRegistry(workspaceRoot: string) {
+  return JSON.parse(
+    await readFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
   ) as {
     skills?: Record<string, { helperPaths?: string[] }>
+    memories?: Record<string, unknown>
+    currentRevision?: string | null
   }
+}
 
-  const helperPaths = registry.skills?.["fixture-refactor"]?.helperPaths
-
-  if (!Array.isArray(helperPaths) || !helperPaths.includes(canonicalHelperPath)) {
-    throw new Error(
-      `scenario create-skill registry missing canonical helper path: ${canonicalHelperPath}`,
-    )
+function assertAuditAction(
+  auditEvents: Array<{ action?: string; status?: string; revisionID?: string }>,
+  action: string,
+  message: string,
+  expectedStatus = "success",
+) {
+  if (!auditEvents.some((event) => event.action === action && event.status === expectedStatus)) {
+    throw new Error(message)
   }
 }
 async function assertProtectedPluginFileUnchanged(baseFixtureRoot: string, workspaceRoot: string) {

@@ -405,7 +405,7 @@ describe("plugin tool surface", () => {
       console.log("applied")
     `)
 
-    expect(firstRun.exitCode).toBe(0)
+    expect(firstRun.exitCode, firstRun.stderr || firstRun.stdout).toBe(0)
     expect(firstRun.stdout).toContain("applied")
 
     const secondRun = await runBunEval(`
@@ -449,6 +449,127 @@ describe("plugin tool surface", () => {
     expect(secondRun.exitCode).toBe(1)
     expect(secondRun.stderr).toContain("artifact-only forbids Basic Memory writes")
     expect(secondRun.stdout).not.toContain("allowed")
+  })
+
+  test("does not re-inject the operator guide when a continued session resumes in a fresh process", async () => {
+    const firstRun = await runBunEval(`
+      const { OCEvolverPlugin } = await import("file:///home/ryodeushii/repos/oc-evolver/src/oc-evolver.ts")
+      const workspaceRoot = process.cwd()
+      const prompts = []
+      const hooks = await OCEvolverPlugin({
+        client: {
+          session: {
+            prompt: async (payload) => {
+              prompts.push(payload)
+              return { info: {}, parts: [] }
+            },
+          },
+        },
+        project: {
+          id: "fixture-project",
+          worktree: workspaceRoot,
+        },
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        experimental_workspace: {
+          register() {},
+        },
+        serverUrl: new URL("http://localhost:4096"),
+        $: {},
+      })
+
+      await hooks.tool.evolver_write_memory.execute(
+        {
+          memoryName: "guided-session-memory",
+          document: "---\\nname: guided-session-memory\\ndescription: Persist operator guide state\\nstorage_mode: memory-only\\n---\\n\\nRoute durable notes to Basic Memory.\\n",
+        },
+        {
+          sessionID: "session-guided-across-processes",
+          messageID: "message-1",
+          agent: "main",
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          abort: new AbortController().signal,
+          metadata() {},
+          ask() {
+            throw new Error("not implemented")
+          },
+        },
+      )
+
+      await hooks.tool.evolver_apply_memory.execute(
+        {
+          memoryName: "guided-session-memory",
+        },
+        {
+          sessionID: "session-guided-across-processes",
+          messageID: "message-2",
+          agent: "main",
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          abort: new AbortController().signal,
+          metadata() {},
+          ask() {
+            throw new Error("not implemented")
+          },
+        },
+      )
+
+      console.log("promptCount=" + prompts.length)
+    `);
+
+    expect(firstRun.exitCode).toBe(0)
+    expect(firstRun.stdout).toContain("promptCount=2")
+
+    const secondRun = await runBunEval(`
+      const { OCEvolverPlugin } = await import("file:///home/ryodeushii/repos/oc-evolver/src/oc-evolver.ts")
+      const workspaceRoot = process.cwd()
+      const prompts = []
+      const hooks = await OCEvolverPlugin({
+        client: {
+          session: {
+            prompt: async (payload) => {
+              prompts.push(payload)
+              return { info: {}, parts: [] }
+            },
+          },
+        },
+        project: {
+          id: "fixture-project",
+          worktree: workspaceRoot,
+        },
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        experimental_workspace: {
+          register() {},
+        },
+        serverUrl: new URL("http://localhost:4096"),
+        $: {},
+      })
+
+      await hooks.tool.evolver_apply_memory.execute(
+        {
+          memoryName: "guided-session-memory",
+        },
+        {
+          sessionID: "session-guided-across-processes",
+          messageID: "message-3",
+          agent: "main",
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          abort: new AbortController().signal,
+          metadata() {},
+          ask() {
+            throw new Error("not implemented")
+          },
+        },
+      )
+
+      console.log("promptCount=" + prompts.length)
+    `);
+
+    expect(secondRun.exitCode).toBe(0)
+    expect(secondRun.stdout).toContain("promptCount=1")
   })
 
   test("allows source repo edits in an oc-evolver development workspace", async () => {

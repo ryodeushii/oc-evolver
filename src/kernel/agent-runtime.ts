@@ -1,10 +1,11 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { readFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
 import { appendAuditEvent } from "./audit.ts"
 import { ensureOperatorGuideForSession } from "./operator-guide.ts"
 import { loadRegistry, rollbackLatestRevision } from "./registry.ts"
 import { resolveKernelPaths } from "./paths.ts"
+import { loadPersistedSessionState, persistSessionState } from "./session-state.ts"
 import type { OCEvolverRuntimeContract } from "./types.ts"
 import {
   parseAgentDocument,
@@ -90,6 +91,8 @@ export async function applySkillToSession(input: {
   await promptSession({
     client: input.client,
     sessionID: input.sessionID,
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
     body: {
       noReply: true,
       parts: [{ type: "text", text: promptSections.join("\n\n") }],
@@ -131,6 +134,8 @@ export async function applyMemoryToSession(input: {
   await promptSession({
     client: input.client,
     sessionID: input.sessionID,
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
     body: {
       noReply: true,
       parts: [{ type: "text", text: formatMemoryProfilePrompt(memoryProfile) }],
@@ -190,6 +195,8 @@ export async function runAgentInSession(input: {
   await promptSession({
     client: input.client,
     sessionID: input.sessionID,
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
     body: {
       noReply: true,
       system: [
@@ -216,6 +223,8 @@ export async function runAgentInSession(input: {
 
 async function promptSession(input: {
   client: SessionPromptClient
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
   sessionID: string
   body: {
     noReply: true
@@ -225,6 +234,8 @@ async function promptSession(input: {
 }) {
   await ensureOperatorGuideForSession({
     client: input.client,
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
     sessionID: input.sessionID,
   })
 
@@ -379,29 +390,20 @@ async function loadSessionMemoryState(input: {
     return cachedProfiles
   }
 
-  try {
-    const persistedState = JSON.parse(
-      await readFile(resolveSessionStatePath(input.pluginFilePath, input.runtimeContract, input.sessionID), "utf8"),
-    ) as {
-      memories?: Record<string, SessionMemoryState>
-    }
+  const persistedState = await loadPersistedSessionState(input)
+  const appliedProfiles = new Map(
+    Object.entries(persistedState.memories ?? {}).map(([memoryName, profile]) => [
+      memoryName,
+      { storageMode: profile.storageMode },
+    ]),
+  )
 
-    const appliedProfiles = new Map(
-      Object.entries(persistedState.memories ?? {}).map(([memoryName, profile]) => [
-        memoryName,
-        { storageMode: profile.storageMode },
-      ]),
-    )
-
-    sessionMemories.set(input.sessionID, appliedProfiles)
-    return appliedProfiles
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return null
-    }
-
-    throw error
+  if (appliedProfiles.size === 0) {
+    return null
   }
+
+  sessionMemories.set(input.sessionID, appliedProfiles)
+  return appliedProfiles
 }
 
 async function persistSessionMemoryState(input: {
@@ -410,35 +412,18 @@ async function persistSessionMemoryState(input: {
   sessionID: string
   appliedProfiles: Map<string, SessionMemoryState>
 }) {
-  const sessionStatePath = resolveSessionStatePath(
-    input.pluginFilePath,
-    input.runtimeContract,
-    input.sessionID,
-  )
+  const persistedState = await loadPersistedSessionState(input)
 
-  await mkdir(dirname(sessionStatePath), { recursive: true })
-  await writeFile(
-    sessionStatePath,
-    JSON.stringify(
-      {
-        memories: Object.fromEntries(input.appliedProfiles.entries()),
-      },
-      null,
-      2,
-    ),
-  )
+  await persistSessionState({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    state: {
+      ...persistedState,
+      memories: Object.fromEntries(input.appliedProfiles.entries()),
+    },
+  })
 }
-
-function resolveSessionStatePath(
-  pluginFilePath: string,
-  runtimeContract: OCEvolverRuntimeContract,
-  sessionID: string,
-) {
-  const kernelPaths = resolveKernelPaths(pluginFilePath, runtimeContract)
-
-  return join(kernelPaths.registryRoot, "sessions", `${encodeURIComponent(sessionID)}.json`)
-}
-
 function mergeMemoryNames(...memoryNameLists: string[][]) {
   return [...new Set(memoryNameLists.flat())]
 }

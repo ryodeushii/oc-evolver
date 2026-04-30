@@ -1,3 +1,6 @@
+import { loadPersistedSessionState, persistSessionState } from "./session-state.ts"
+import type { OCEvolverRuntimeContract } from "./types.ts"
+
 const guidedSessions = new Set<string>()
 
 type SessionPromptClient = {
@@ -21,10 +24,25 @@ export function buildOperatorGuide() {
 
 export async function ensureOperatorGuideForSession(input: {
   client: SessionPromptClient
+  pluginFilePath?: string
+  runtimeContract?: OCEvolverRuntimeContract
   sessionID: string
 }) {
   if (guidedSessions.has(input.sessionID)) {
     return
+  }
+
+  if (input.pluginFilePath && input.runtimeContract) {
+    const persistedState = await loadPersistedSessionState({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      sessionID: input.sessionID,
+    })
+
+    if (persistedState.operatorGuideApplied) {
+      guidedSessions.add(input.sessionID)
+      return
+    }
   }
 
   await input.client.session.prompt({
@@ -36,4 +54,22 @@ export async function ensureOperatorGuideForSession(input: {
   })
 
   guidedSessions.add(input.sessionID)
+
+  if (input.pluginFilePath && input.runtimeContract) {
+    const persistedState = await loadPersistedSessionState({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      sessionID: input.sessionID,
+    })
+
+    await persistSessionState({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      sessionID: input.sessionID,
+      state: {
+        ...persistedState,
+        operatorGuideApplied: true,
+      },
+    })
+  }
 }
