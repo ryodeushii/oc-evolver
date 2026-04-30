@@ -55,6 +55,9 @@ describe("plugin tool surface", () => {
       "evolver_write_memory",
       "evolver_write_skill",
     ])
+
+    expect(hooks.tool?.evolver_apply_memory?.description).toContain("memory profile")
+    expect(hooks.tool?.evolver_rollback?.description).toContain("Rollback")
   })
 
   test("package root exposes the plugin server entrypoint", async () => {

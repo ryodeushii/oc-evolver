@@ -18,6 +18,9 @@ The runner currently executes these default scenarios:
 - `reuse-skill`
 - `policy-deny`
 - `invalid-artifact`
+- `memory-guided-write`
+- `artifact-only-deny`
+- `rollback`
 
 ## Result artifacts
 
@@ -86,6 +89,31 @@ Key files:
   - `audit.ndjson` contains `validate` failure with `failureClass: "invalid_artifact"`
   - `registry.json` contains quarantine metadata for the broken skill path
 
+### `memory-guided-write`
+
+- Prompts the model to create a reusable routing profile without naming the write tool directly
+- Expected artifact signal:
+  - `.opencode/memory/research-routing.md`
+  - `audit.ndjson` contains `write_memory`
+  - `registry.json` contains a `memories.research-routing` entry
+  - changed files do not include a new repo-local policy or spec markdown file
+
+### `artifact-only-deny`
+
+- Applies an `artifact-only` memory profile, then attempts a Basic Memory note write
+- Expected artifact signal:
+  - `.opencode/memory/artifact-only-session.md`
+  - `audit.ndjson` contains `write_memory`, `apply_memory`, and `policy_denied`
+  - the blocked Basic Memory write leaves no durable note artifact in the fixture workspace
+
+### `rollback`
+
+- Creates one mutable command revision, overwrites it, then rolls the latest revision back
+- Expected artifact signal:
+  - `.opencode/commands/review-markdown.md` restored to the first command body
+  - `audit.ndjson` contains `rollback` with both the restored and rolled-back revision ids
+  - `registry.json.currentRevision` points at the restored revision
+
 ## Failure inspection
 
 When a scenario fails, inspect these files in order:
@@ -110,37 +138,40 @@ This section is updated from the latest full sweep artifacts.
 
 | Check | Command | Status | Notes |
 | --- | --- | --- | --- |
-| TypeScript | `bun run typecheck` | PASS | Clean `tsc --noEmit` run during Task 8 sweep |
-| Unit tests | `bun run test:unit` | PASS | `37 pass`, `0 fail`, `119 expect()` |
-| Smoke eval | `bun run eval:smoke` | PASS | Latest artifact: `eval/results/smoke/2026-04-30T02-18-38.092Z/` |
+| TypeScript | `bun run typecheck` | PASS | Fresh clean `tsc --noEmit` run during operator-guide verification |
+| Unit tests | `bun run test:unit` | PASS | `50 pass`, `0 fail`, `169 expect()` |
+| Smoke eval | `bun run eval:smoke` | PASS | Latest artifact: `eval/results/smoke/2026-04-30T12-26-40.954Z/` |
 | Full eval suite | `bun run eval:all` | PASS | Latest scenario artifacts listed below |
 
 ## Latest full-sweep artifacts
 
-- `smoke`: `eval/results/smoke/2026-04-30T02-18-38.092Z/`
+- `smoke`: `eval/results/smoke/2026-04-30T12-26-40.954Z/`
   - `exitCode: 0`
   - `changedFiles: []`
-- `create-skill`: `eval/results/create-skill/2026-04-30T02-18-52.837Z/`
+- `create-skill`: `eval/results/create-skill/2026-04-30T12-26-57.079Z/`
   - `exitCode: 0`
-  - changed files include `SKILL.md`, helper script, registry, audit, and revision snapshot
-- `create-agent`: `eval/results/create-agent/2026-04-30T02-19-56.604Z/`
+  - changed files include the skill bundle, registry, audit, and a revision snapshot
+- `create-agent`: `eval/results/create-agent/2026-04-30T12-27-47.377Z/`
   - `exitCode: 0`
-  - changed files include `.opencode/agent/fixture-reviewer.md`, registry, audit, and revision snapshot
-- `reuse-skill`: `eval/results/reuse-skill/2026-04-30T02-20-56.318Z/`
+  - changed files include `.opencode/agent/fixture-reviewer.md`, registry, audit, and a revision snapshot
+- `reuse-skill`: `eval/results/reuse-skill/2026-04-30T12-28-38.984Z/`
   - `exitCode: 0`
   - `turnCount: 4`
-  - changed files include skill bundle, agent, registry, audit, revision snapshots, and `README.md`
-- `policy-deny`: `eval/results/policy-deny/2026-04-30T02-22-14.955Z/`
+  - changed files include the skill bundle, agent, registry, audit, revision snapshots, and `README.md`
+- `policy-deny`: `eval/results/policy-deny/2026-04-30T12-29-41.302Z/`
   - `exitCode: 0`
   - changed files include only `.opencode/oc-evolver/audit.ndjson`
-- `invalid-artifact`: `eval/results/invalid-artifact/2026-04-30T02-22-43.919Z/`
+- `invalid-artifact`: `eval/results/invalid-artifact/2026-04-30T12-30-07.095Z/`
   - `exitCode: 0`
-  - changed files include audit, registry, and seeded invalid skill bundle
-
-## Recent reference artifacts
-
-These artifact directories were used to close Task 7 before the final sweep:
-
-- `eval/results/reuse-skill/2026-04-30T16-10-00.000Z/`
-- `eval/results/policy-deny/2026-04-30T17-00-00.000Z-policy-deny/`
-- `eval/results/invalid-artifact/2026-04-30T17-00-00.000Z-invalid-artifact/`
+  - changed files include audit, registry, and the seeded invalid skill bundle
+- `memory-guided-write`: `eval/results/memory-guided-write/2026-04-30T12-30-23.064Z/`
+  - `exitCode: 0`
+  - changed files include `.opencode/memory/research-routing.md`, registry, audit, and a revision snapshot
+- `artifact-only-deny`: `eval/results/artifact-only-deny/2026-04-30T12-31-15.811Z/`
+  - `exitCode: 0`
+  - `turnCount: 2`
+  - audit includes `write_memory`, `apply_memory`, and `policy_denied`
+- `rollback`: `eval/results/rollback/2026-04-30T12-31-30.913Z/`
+  - `exitCode: 0`
+  - `turnCount: 3`
+  - changed files include `.opencode/commands/review-markdown.md`, registry, audit, and two revision snapshots

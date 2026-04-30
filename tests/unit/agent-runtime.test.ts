@@ -37,7 +37,7 @@ describe("agent runtime", () => {
     mock.restore()
   })
 
-  test("evolver_apply_skill injects the current skill bundle into the session with noReply", async () => {
+  test("evolver_apply_skill injects the operator guide before the current skill bundle", async () => {
     const hooks = await OCEvolverPlugin({
       client: {
         session: {
@@ -109,16 +109,26 @@ Use the helper script.
       },
     )
 
-    expect(promptCalls).toHaveLength(1)
+    expect(promptCalls).toHaveLength(2)
     expect(promptCalls[0]).toMatchObject({
       path: { id: "session-1" },
       body: {
         noReply: true,
       },
     })
-    expect(JSON.stringify(promptCalls[0])).toContain("fixture-refactor")
-    expect(JSON.stringify(promptCalls[0])).toContain("scripts/rewrite.py")
-    expect(JSON.stringify(promptCalls[0])).toContain("print('rewrite')")
+    expect(JSON.stringify(promptCalls[0])).toContain("evolver_status")
+    expect(JSON.stringify(promptCalls[0])).toContain("evolver_apply_memory")
+    expect(JSON.stringify(promptCalls[0])).toContain("artifact-only")
+
+    expect(promptCalls[1]).toMatchObject({
+      path: { id: "session-1" },
+      body: {
+        noReply: true,
+      },
+    })
+    expect(JSON.stringify(promptCalls[1])).toContain("fixture-refactor")
+    expect(JSON.stringify(promptCalls[1])).toContain("scripts/rewrite.py")
+    expect(JSON.stringify(promptCalls[1])).toContain("print('rewrite')")
 
     const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
     expect(auditLog).toContain("apply_skill")
@@ -196,16 +206,17 @@ Prefer Basic Memory notes for durable project guidance.
       },
     )
 
-    expect(promptCalls).toHaveLength(1)
-    expect(promptCalls[0]).toMatchObject({
+    expect(promptCalls).toHaveLength(2)
+    expect(JSON.stringify(promptCalls[0])).toContain("evolver_apply_memory")
+    expect(promptCalls[1]).toMatchObject({
       path: { id: "session-3" },
       body: {
         noReply: true,
       },
     })
-    expect(JSON.stringify(promptCalls[0])).toContain("project-preferences")
-    expect(JSON.stringify(promptCalls[0])).toContain("memory://plans/oc-evolver/*")
-    expect(JSON.stringify(promptCalls[0])).toContain("Prefer Basic Memory notes")
+    expect(JSON.stringify(promptCalls[1])).toContain("project-preferences")
+    expect(JSON.stringify(promptCalls[1])).toContain("memory://plans/oc-evolver/*")
+    expect(JSON.stringify(promptCalls[1])).toContain("Prefer Basic Memory notes")
 
     const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
     expect(auditLog).toContain("apply_memory")
@@ -280,16 +291,17 @@ Review markdown changes before they land.
       },
     )
 
-    expect(promptCalls).toHaveLength(1)
-    expect(promptCalls[0]).toMatchObject({
+    expect(promptCalls).toHaveLength(2)
+    expect(JSON.stringify(promptCalls[0])).toContain("evolver_run_agent")
+    expect(promptCalls[1]).toMatchObject({
       path: { id: "session-2" },
       body: {
         noReply: true,
       },
     })
-    expect(JSON.stringify(promptCalls[0])).toContain("fixture-reviewer")
-    expect(JSON.stringify(promptCalls[0])).toContain("Review markdown changes before they land")
-    expect(JSON.stringify(promptCalls[0])).toContain("Review README.md and summarize the risk")
+    expect(JSON.stringify(promptCalls[1])).toContain("fixture-reviewer")
+    expect(JSON.stringify(promptCalls[1])).toContain("Review markdown changes before they land")
+    expect(JSON.stringify(promptCalls[1])).toContain("Review README.md and summarize the risk")
 
     const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
     expect(auditLog).toContain("run_agent")
@@ -395,9 +407,10 @@ Review markdown changes before they land.
       },
     )
 
-    expect(promptCalls).toHaveLength(1)
-    expect(JSON.stringify(promptCalls[0])).toContain("project-preferences")
-    expect(JSON.stringify(promptCalls[0])).toContain("memory://plans/oc-evolver/*")
-    expect(JSON.stringify(promptCalls[0])).toContain("Review relevant memory before proposing durable behavior changes")
+    expect(promptCalls).toHaveLength(2)
+    expect(JSON.stringify(promptCalls[0])).toContain("evolver_run_agent")
+    expect(JSON.stringify(promptCalls[1])).toContain("project-preferences")
+    expect(JSON.stringify(promptCalls[1])).toContain("memory://plans/oc-evolver/*")
+    expect(JSON.stringify(promptCalls[1])).toContain("Review relevant memory before proposing durable behavior changes")
   })
 })

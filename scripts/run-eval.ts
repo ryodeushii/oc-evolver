@@ -50,6 +50,9 @@ const DEFAULT_SCENARIOS = [
   "reuse-skill",
   "policy-deny",
   "invalid-artifact",
+  "memory-guided-write",
+  "artifact-only-deny",
+  "rollback",
 ]
 
 const IGNORED_CHANGED_FILE_PREFIXES = [".opencode/node_modules/"]

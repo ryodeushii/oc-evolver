@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
 import { appendAuditEvent } from "./audit.ts"
+import { ensureOperatorGuideForSession } from "./operator-guide.ts"
 import { loadRegistry, rollbackLatestRevision } from "./registry.ts"
 import { resolveKernelPaths } from "./paths.ts"
 import type { OCEvolverRuntimeContract } from "./types.ts"
@@ -77,8 +78,9 @@ export async function applySkillToSession(input: {
     ),
   ]
 
-  await input.client.session.prompt({
-    path: { id: input.sessionID },
+  await promptSession({
+    client: input.client,
+    sessionID: input.sessionID,
     body: {
       noReply: true,
       parts: [{ type: "text", text: promptSections.join("\n\n") }],
@@ -112,8 +114,9 @@ export async function applyMemoryToSession(input: {
 
   rememberLoadedMemoryProfiles(input.sessionID, [memoryProfile])
 
-  await input.client.session.prompt({
-    path: { id: input.sessionID },
+  await promptSession({
+    client: input.client,
+    sessionID: input.sessionID,
     body: {
       noReply: true,
       parts: [{ type: "text", text: formatMemoryProfilePrompt(memoryProfile) }],
@@ -161,8 +164,9 @@ export async function runAgentInSession(input: {
 
   rememberLoadedMemoryProfiles(input.sessionID, memoryProfiles)
 
-  await input.client.session.prompt({
-    path: { id: input.sessionID },
+  await promptSession({
+    client: input.client,
+    sessionID: input.sessionID,
     body: {
       noReply: true,
       system: [
@@ -184,6 +188,26 @@ export async function runAgentInSession(input: {
       revisionID: agentEntry.revisionID,
       detail: `composed agent ${input.agentName} into session ${input.sessionID}`,
     },
+  })
+}
+
+async function promptSession(input: {
+  client: SessionPromptClient
+  sessionID: string
+  body: {
+    noReply: true
+    system?: string
+    parts: Array<{ type: "text"; text: string }>
+  }
+}) {
+  await ensureOperatorGuideForSession({
+    client: input.client,
+    sessionID: input.sessionID,
+  })
+
+  await input.client.session.prompt({
+    path: { id: input.sessionID },
+    body: input.body,
   })
 }
 
