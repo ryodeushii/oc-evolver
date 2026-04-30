@@ -1,0 +1,33 @@
+{
+  "opencodeVersion": "1.14.29",
+  "runFlags": [
+    "--command",
+    "--continue",
+    "--session",
+    "--fork",
+    "--share",
+    "--model",
+    "--agent",
+    "--format",
+    "--file",
+    "--attach",
+    "--password",
+    "--dir",
+    "--port",
+    "--variant",
+    "--thinking",
+    "--dangerously-skip-permissions"
+  ],
+  "agentCreateFlags": [
+    "--path",
+    "--description",
+    "--mode",
+    "--permissions",
+    "--model"
+  ],
+  "nativeAgentDir": "agent",
+  "pluginDir": ".opencode/plugins",
+  "registryDir": ".opencode/oc-evolver",
+  "skillDir": ".opencode/skills",
+  "commandDir": ".opencode/commands"
+}

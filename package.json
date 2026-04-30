@@ -1,0 +1,22 @@
+{
+  "name": "oc-evolver",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.13",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:unit": "bun test",
+    "eval:smoke": "bun run scripts/run-eval.ts smoke",
+    "eval:all": "bun run scripts/run-eval.ts all"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@opencode-ai/sdk": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "latest",
+    "typescript": "latest"
+  }
+}
