@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.13",
+  "exports": {
+    ".": "./src/oc-evolver.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test:unit": "bun test",
