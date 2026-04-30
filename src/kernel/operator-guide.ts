@@ -18,7 +18,7 @@ export function buildOperatorGuide() {
     "- Use evolver_apply_skill and evolver_apply_memory to inject reusable behavior into the current session.",
     "- Use evolver_run_agent for reusable subagent behavior.",
     "- Use evolver_run_command to execute reusable command behavior, including any referenced agent instructions.",
-    "- Use evolver_promote and evolver_reject to explicitly accept or discard pending revisions.",
+    "- Use evolver_promote and evolver_reject to explicitly accept or discard pending revisions during interactive sessions; the external autonomous runner can do this automatically after verification.",
     "- Use evolver_rollback to restore the previous accepted revision when a mutation turns out to be wrong.",
     "- Docs, specs, research, architecture notes, and durable knowledge default to Basic Memory unless the user asked for a repository artifact.",
     "- Respect session storage modes: memory-only, artifact-only, memory-and-artifact.",

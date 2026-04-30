@@ -53,7 +53,7 @@ The kernel blocks autonomous edits to protected paths, including:
 - `.opencode/package.json`
 - lockfiles
 
-Protected-path denial is enforced both through `permission.ask` and through `tool.execute.before` for `apply_patch`, so the plugin still blocks kernel edits during eval runs that use `--dangerously-skip-permissions`.
+Protected-path denial is enforced both through `permission.ask` and through `tool.execute.before` for mutating filesystem tools such as `write`, `edit`, `patch`, and `apply_patch`, so the plugin still blocks kernel edits during eval runs that use `--dangerously-skip-permissions`.
 
 When the current workspace is the `oc-evolver` source repo itself, the plugin relaxes that self-protection so the agent can edit `src/oc-evolver.ts` and the rest of the kernel during local development. Installed/runtime usage keeps the normal protections.
 
@@ -76,7 +76,9 @@ The plugin exposes this stable v1 tool surface:
 - `evolver_reject`
 - `evolver_rollback`
 
-Mutable writes now land as pending revisions. Use `evolver_check` to see whether the registry is clean and whether a pending revision is still awaiting review, then use `evolver_promote` or `evolver_reject` to explicitly accept or discard that pending state.
+Mutable writes now land as pending revisions. In the interactive/operator flow, use `evolver_check` to see whether the registry is clean and whether a pending revision is still awaiting review, then use `evolver_promote` or `evolver_reject` to explicitly accept or discard that pending state.
+
+For a closed-loop path, `bun run autonomous:run` drives `opencode run` against the real repo, reuses the last continued session, persists loop learning under `.opencode/oc-evolver/autonomous-loop.json`, runs the default verification gates (`bun run typecheck`, `bun run test:unit`), runs the `smoke` eval by default, and then auto-promotes or auto-rejects the pending revision. Pass `--worker` to keep that loop on a Worker-backed 15-minute schedule by default, or override the cadence with `--interval-ms <ms>`.
 
 Commands are executable runtime artifacts rather than write-only markdown. `evolver_run_command` composes command instructions with any referenced agent instructions, inherited memory profiles, runtime permission metadata, and preferred model guidance.
 
@@ -89,6 +91,7 @@ If a session applies a memory profile with `storage_mode: artifact-only`, the pl
 - Install dependencies: `bun install`
 - Typecheck: `bun run typecheck`
 - Unit tests: `bun run test:unit`
+- Autonomous loop: `bun run autonomous:run`
 - Smoke eval: `bun run eval:smoke`
 - Full eval suite: `bun run eval:all`
 

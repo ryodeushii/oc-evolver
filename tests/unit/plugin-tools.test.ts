@@ -474,6 +474,189 @@ describe("plugin tool surface", () => {
     expect(auditLog).toContain(".opencode/plugins/oc-evolver.ts")
   })
 
+  test("does not let runtime write allow bypass protected-path denial in permission.ask", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_agent?.execute(
+      {
+        agentName: "write-allowed-reviewer",
+        document: `---
+description: Allow writes in general
+mode: subagent
+permission:
+  write: allow
+---
+
+Write files when needed.
+`,
+      },
+      {
+        sessionID: "session-write-allowed-agent",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_run_agent?.execute(
+      {
+        agentName: "write-allowed-reviewer",
+        prompt: "Write docs updates.",
+      },
+      {
+        sessionID: "session-write-allowed-agent",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    const output: { status: "ask" | "deny" | "allow" } = {
+      status: "ask",
+    }
+
+    await hooks["permission.ask"]?.(
+      {
+        id: "perm-write-allow-1",
+        type: "write",
+        pattern: ".opencode/plugins/oc-evolver.ts",
+        sessionID: "session-write-allowed-agent",
+        messageID: "message-3",
+        title: "Write protected plugin",
+        metadata: {},
+        time: {
+          created: Date.now(),
+        },
+      },
+      output,
+    )
+
+    expect(output.status).toBe("deny")
+  })
+
+  test("denies protected plugin writes through tool.execute.before for write", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: "/",
+      },
+      directory: workspaceRoot,
+      worktree: "/",
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await expect(
+      hooks["tool.execute.before"]?.(
+        {
+          tool: "write",
+          sessionID: "session-write-1",
+          callID: "call-write-1",
+        },
+        {
+          args: {
+            file_path: ".opencode/plugins/oc-evolver.ts",
+            content: 'console.log("hello")\n',
+          },
+        },
+      ),
+    ).rejects.toThrow(/protected path/i)
+
+    const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
+
+    expect(auditLog).toContain("policy_denied")
+    expect(auditLog).toContain(".opencode/plugins/oc-evolver.ts")
+  })
+
+  test("denies protected patch move destinations through tool.execute.before", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: "/",
+      },
+      directory: workspaceRoot,
+      worktree: "/",
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
+    await writeFile(join(workspaceRoot, ".opencode/commands/review.md"), "hello\n")
+
+    await expect(
+      hooks["tool.execute.before"]?.(
+        {
+          tool: "patch",
+          sessionID: "session-patch-1",
+          callID: "call-patch-1",
+        },
+        {
+          args: {
+            patch_text: [
+              "*** Begin Patch",
+              "*** Update File: .opencode/commands/review.md",
+              "*** Move to: .opencode/plugins/oc-evolver.ts",
+              "@@",
+              "-hello",
+              "+hello moved",
+              "*** End Patch",
+            ].join("\n"),
+          },
+        },
+      ),
+    ).rejects.toThrow(/protected path/i)
+
+    const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
+
+    expect(auditLog).toContain("policy_denied")
+    expect(auditLog).toContain(".opencode/plugins/oc-evolver.ts")
+  })
+
   test("persists artifact-only memory policy across continued sessions", async () => {
     const firstRun = await runBunEval(`
       const { OCEvolverPlugin } = await import("file:///home/ryodeushii/repos/oc-evolver/src/oc-evolver.ts")

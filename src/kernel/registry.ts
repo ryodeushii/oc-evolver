@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
 import { dirname, join, relative, resolve } from "node:path"
 
 import { appendAuditEvent } from "./audit.ts"
@@ -129,9 +129,39 @@ export async function loadRegistry(
     const rawRegistry = JSON.parse(await readFile(registryPath, "utf8")) as Partial<OCEvolverRegistry>
 
     return normalizeRegistry(rawRegistry)
-  } catch {
-    return emptyRegistry()
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return emptyRegistry()
+    }
+
+    throw error
   }
+}
+
+function getAtomicWriteTempPath(targetPath: string) {
+  return join(dirname(targetPath), `${randomUUID()}.tmp`)
+}
+
+async function cleanupIfExists(path: string) {
+  try {
+    await rm(path, { force: true })
+  } catch {
+    // Cleanup should not hide the original write result.
+  }
+}
+
+async function replaceFileAtomically(sourcePath: string, destinationPath: string) {
+  try {
+    await rename(sourcePath, destinationPath)
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      await cleanupIfExists(sourcePath)
+    }
+
+    throw error
+  }
+
+  await cleanupIfExists(sourcePath)
 }
 
 export async function ensureKernelRuntimePaths(
@@ -1354,17 +1384,12 @@ async function writeJSONAtomically(input: {
   path: string
   value: unknown
 }) {
-  const tempPath = `${input.path}.tmp-${randomUUID()}`
+  const tempPath = getAtomicWriteTempPath(input.path)
 
   await mkdir(dirname(input.path), { recursive: true })
   await ensureAutonomousPathAllowed(input.pluginFilePath, input.runtimeContract, input.path)
   await ensureAutonomousPathAllowed(input.pluginFilePath, input.runtimeContract, tempPath)
 
-  try {
-    await writeFile(tempPath, `${JSON.stringify(input.value, null, 2)}\n`)
-    await rm(input.path, { force: true })
-    await writeFile(input.path, await readFile(tempPath, "utf8"))
-  } finally {
-    await rm(tempPath, { force: true })
-  }
+  await writeFile(tempPath, `${JSON.stringify(input.value, null, 2)}\n`)
+  await replaceFileAtomically(tempPath, input.path)
 }

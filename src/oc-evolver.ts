@@ -39,7 +39,7 @@ type PermissionRequest = {
   sessionID?: string
 }
 
-const MUTATING_PERMISSION_TYPES = new Set(["create", "delete", "edit", "move", "write"])
+const MUTATING_PERMISSION_TYPES = new Set(["create", "delete", "edit", "move", "update", "write"])
 const BASIC_MEMORY_MUTATION_TOOLS = new Set([
   "basic-memory_write_note",
   "basic-memory_edit_note",
@@ -157,10 +157,55 @@ function extractPatchTargetPaths(patchText: string) {
 
     if (line.startsWith("*** Delete File: ")) {
       targets.push(line.slice("*** Delete File: ".length).trim())
+      continue
+    }
+
+    if (line.startsWith("*** Move to: ")) {
+      targets.push(line.slice("*** Move to: ".length).trim())
     }
   }
 
   return targets
+}
+
+function getPatchTextFromToolArgs(args: Record<string, unknown> | undefined) {
+  if (typeof args?.patchText === "string") {
+    return args.patchText
+  }
+
+  if (typeof args?.patch_text === "string") {
+    return args.patch_text
+  }
+
+  if (typeof args?.patch === "string") {
+    return args.patch
+  }
+
+  return null
+}
+
+function getMutatingToolTargetPaths(input: {
+  toolName: string
+  args: Record<string, unknown> | undefined
+}) {
+  if (input.toolName === "write" || input.toolName === "edit") {
+    const filePath =
+      typeof input.args?.file_path === "string"
+        ? input.args.file_path
+        : typeof input.args?.filePath === "string"
+          ? input.args.filePath
+          : null
+
+    return filePath ? [filePath] : []
+  }
+
+  if (input.toolName === "apply_patch" || input.toolName === "patch") {
+    const patchText = getPatchTextFromToolArgs(input.args)
+
+    return patchText ? extractPatchTargetPaths(patchText) : []
+  }
+
+  return []
 }
 
 function resolveRuntimePermissionValue(input: {
@@ -188,7 +233,11 @@ function resolveRuntimePermissionValue(input: {
 }
 
 function getToolPermissionType(toolName: string) {
-  if (toolName === "apply_patch") {
+  if (toolName === "write" || toolName === "edit") {
+    return "write"
+  }
+
+  if (toolName === "apply_patch" || toolName === "patch") {
     return "edit"
   }
 
@@ -518,12 +567,11 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
           return
         }
 
-        if (runtimePermission === "allow") {
-          output.status = "allow"
-          return
-        }
-
         if (!isMutatingPermission(permission) || isDevelopmentWorkspace) {
+          if (runtimePermission === "allow") {
+            output.status = "allow"
+          }
+
           return
         }
 
@@ -544,6 +592,10 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
 
             return
           }
+        }
+
+        if (runtimePermission === "allow") {
+          output.status = "allow"
         }
       },
       "tool.execute.before": async (input, output) => {
@@ -596,22 +648,20 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
           throw new Error(detail)
         }
 
-        if (input.tool !== "apply_patch" || isDevelopmentWorkspace) {
+        if (isDevelopmentWorkspace) {
           return
         }
 
-        const patchText =
-          typeof output.args?.patchText === "string"
-            ? output.args.patchText
-            : typeof output.args?.patch === "string"
-              ? output.args.patch
-              : null
+        const targetPaths = getMutatingToolTargetPaths({
+          toolName: input.tool,
+          args: output.args as Record<string, unknown> | undefined,
+        })
 
-        if (!patchText) {
+        if (targetPaths.length === 0) {
           return
         }
 
-        for (const targetPath of extractPatchTargetPaths(patchText)) {
+        for (const targetPath of targetPaths) {
           try {
             await ensureAutonomousPathAllowed(
               pluginFilePath,

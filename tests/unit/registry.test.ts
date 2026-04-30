@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -10,6 +10,7 @@ import {
   promotePendingRevision,
   rejectPendingRevision,
   rollbackLatestRevision,
+  saveRegistry,
 } from "../../src/kernel/registry.ts"
 
 describe("registry transactions", () => {
@@ -51,6 +52,63 @@ describe("registry transactions", () => {
       currentRevision: null,
       pendingRevision: null,
     })
+  })
+
+  test("returns an empty registry only when the registry file is missing", async () => {
+    await rm(join(workspaceRoot, ".opencode/oc-evolver/registry.json"))
+
+    expect(await loadRegistry(pluginFilePath, runtimeContract)).toEqual({
+      skills: {},
+      agents: {},
+      commands: {},
+      memories: {},
+      quarantine: {},
+      currentRevision: null,
+      pendingRevision: null,
+    })
+  })
+
+  test("surfaces malformed registry JSON instead of silently resetting state", async () => {
+    await writeFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), "{not valid json\n")
+
+    await expect(loadRegistry(pluginFilePath, runtimeContract)).rejects.toThrow()
+  })
+
+  test("saveRegistry replaces the registry contents and cleans up temp files", async () => {
+    await saveRegistry(pluginFilePath, runtimeContract, {
+      skills: {},
+      agents: {},
+      commands: {
+        review: {
+          kind: "command",
+          name: "review",
+          nativePath: ".opencode/commands/review.md",
+          revisionID: "revision-1",
+          contentHash: "abc123",
+        },
+      },
+      memories: {},
+      quarantine: {},
+      currentRevision: "revision-1",
+      pendingRevision: null,
+    })
+
+    const savedRegistry = JSON.parse(
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
+    )
+    const registryRootEntries = await readdir(join(workspaceRoot, ".opencode/oc-evolver"))
+
+    expect(savedRegistry).toMatchObject({
+      commands: {
+        review: {
+          nativePath: ".opencode/commands/review.md",
+          revisionID: "revision-1",
+        },
+      },
+      currentRevision: "revision-1",
+      pendingRevision: null,
+    })
+    expect(registryRootEntries.filter((entry) => entry.includes("registry.json.tmp-"))).toEqual([])
   })
 
   test("records a skill mutation as a pending revision snapshot", async () => {
