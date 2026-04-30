@@ -8,6 +8,7 @@ import type { OCEvolverRuntimeContract } from "./types.ts"
 import {
   parseAgentDocument,
   parseCommandDocument,
+  parseMemoryDocument,
   validateSkillBundle,
   type SkillBundleInput,
 } from "./validate.ts"
@@ -116,6 +117,28 @@ export async function materializeCommandDocument(input: {
     runtimeContract: input.runtimeContract,
     filePath,
     content: commandDocument.raw,
+  })
+
+  return { filePath }
+}
+
+export async function materializeMemoryDocument(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  memoryName: string
+  document: string
+}) {
+  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
+  const memoryDocument = parseMemoryDocument(input.document)
+  const filePath = join(kernelPaths.memoriesRoot, `${input.memoryName}.md`)
+
+  await ensureAutonomousPathAllowed(input.pluginFilePath, input.runtimeContract, filePath)
+  await mkdir(kernelPaths.memoriesRoot, { recursive: true })
+  await writeAtomically({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    filePath,
+    content: memoryDocument.raw,
   })
 
   return { filePath }

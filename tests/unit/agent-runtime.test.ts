@@ -26,6 +26,7 @@ describe("agent runtime", () => {
         skills: {},
         agents: {},
         commands: {},
+        memories: {},
         currentRevision: null,
       }, null, 2),
     )
@@ -123,6 +124,93 @@ Use the helper script.
     expect(auditLog).toContain("apply_skill")
   })
 
+  test("evolver_apply_memory injects a memory profile into the session with noReply", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async (payload: unknown) => {
+            promptCalls.push(payload)
+            return { info: {}, parts: [] }
+          },
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_memory?.execute(
+      {
+        memoryName: "project-preferences",
+        document: `---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+  - memory://plans/oc-evolver/*
+queries:
+  - oc-evolver memory profile
+---
+
+Prefer Basic Memory notes for durable project guidance.
+`,
+      },
+      {
+        sessionID: "session-3",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_apply_memory?.execute(
+      {
+        memoryName: "project-preferences",
+      },
+      {
+        sessionID: "session-3",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(promptCalls).toHaveLength(1)
+    expect(promptCalls[0]).toMatchObject({
+      path: { id: "session-3" },
+      body: {
+        noReply: true,
+      },
+    })
+    expect(JSON.stringify(promptCalls[0])).toContain("project-preferences")
+    expect(JSON.stringify(promptCalls[0])).toContain("memory://plans/oc-evolver/*")
+    expect(JSON.stringify(promptCalls[0])).toContain("Prefer Basic Memory notes")
+
+    const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
+    expect(auditLog).toContain("apply_memory")
+  })
+
   test("evolver_run_agent composes the current agent prompt into a session reply", async () => {
     const hooks = await OCEvolverPlugin({
       client: {
@@ -205,5 +293,111 @@ Review markdown changes before they land.
 
     const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
     expect(auditLog).toContain("run_agent")
+  })
+
+  test("evolver_run_agent composes referenced memory profiles into the session reply", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async (payload: unknown) => {
+            promptCalls.push(payload)
+            return { info: {}, parts: [] }
+          },
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_memory?.execute(
+      {
+        memoryName: "project-preferences",
+        document: `---
+name: project-preferences
+description: Shared project memory routing
+sources:
+  - memory://plans/oc-evolver/*
+queries:
+  - oc-evolver memory profile
+---
+
+Review relevant memory before proposing durable behavior changes.
+`,
+      },
+      {
+        sessionID: "session-4",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_write_agent?.execute(
+      {
+        agentName: "fixture-reviewer",
+        document: `---
+description: Review markdown changes
+mode: subagent
+memory:
+  - project-preferences
+permission:
+  edit: deny
+---
+
+Review markdown changes before they land.
+`,
+      },
+      {
+        sessionID: "session-4",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_run_agent?.execute(
+      {
+        agentName: "fixture-reviewer",
+        prompt: "Review README.md and summarize the risk.",
+      },
+      {
+        sessionID: "session-4",
+        messageID: "message-3",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(promptCalls).toHaveLength(1)
+    expect(JSON.stringify(promptCalls[0])).toContain("project-preferences")
+    expect(JSON.stringify(promptCalls[0])).toContain("memory://plans/oc-evolver/*")
+    expect(JSON.stringify(promptCalls[0])).toContain("Review relevant memory before proposing durable behavior changes")
   })
 })

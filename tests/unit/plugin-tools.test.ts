@@ -44,6 +44,7 @@ describe("plugin tool surface", () => {
     } as never)
 
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
+      "evolver_apply_memory",
       "evolver_apply_skill",
       "evolver_rollback",
       "evolver_run_agent",
@@ -51,6 +52,7 @@ describe("plugin tool surface", () => {
       "evolver_validate",
       "evolver_write_agent",
       "evolver_write_command",
+      "evolver_write_memory",
       "evolver_write_skill",
     ])
   })
@@ -119,6 +121,7 @@ describe("plugin tool surface", () => {
     await access(join(globalOpencodeRoot, "skills"))
     await access(join(globalOpencodeRoot, "agent"))
     await access(join(globalOpencodeRoot, "commands"))
+    await access(join(globalOpencodeRoot, "memory"))
 
     await expect(access(join(projectRoot, ".opencode/oc-evolver"))).rejects.toBeDefined()
   })
@@ -172,6 +175,7 @@ describe("plugin tool surface", () => {
       await access(join(globalOpencodeRoot, "skills"))
       await access(join(globalOpencodeRoot, "agent"))
       await access(join(globalOpencodeRoot, "commands"))
+      await access(join(globalOpencodeRoot, "memory"))
 
       await expect(access(join(projectRoot, ".opencode/oc-evolver"))).rejects.toBeDefined()
     } finally {
@@ -208,6 +212,7 @@ describe("plugin tool surface", () => {
     await access(join(workspaceRoot, ".opencode/skills"))
     await access(join(workspaceRoot, ".opencode/agent"))
     await access(join(workspaceRoot, ".opencode/commands"))
+    await access(join(workspaceRoot, ".opencode/memory"))
 
     expect(
       JSON.parse(
@@ -217,6 +222,7 @@ describe("plugin tool surface", () => {
       skills: {},
       agents: {},
       commands: {},
+      memories: {},
       quarantine: {},
       currentRevision: null,
     })
@@ -318,4 +324,76 @@ describe("plugin tool surface", () => {
     expect(auditLog).toContain("policy_denied")
     expect(auditLog).toContain(".opencode/plugins/oc-evolver.ts")
   })
+
+  test("allows source repo edits in an oc-evolver development workspace", async () => {
+    await mkdir(join(workspaceRoot, "src"), { recursive: true })
+    await writeFile(
+      join(workspaceRoot, "package.json"),
+      JSON.stringify({ name: "oc-evolver" }, null, 2),
+    )
+    await writeFile(join(workspaceRoot, "src/oc-evolver.ts"), "export const dev = true\n")
+
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    const output: { status: "ask" | "deny" | "allow" } = {
+      status: "ask",
+    }
+
+    await hooks["permission.ask"]?.(
+      {
+        id: "perm-2",
+        type: "edit",
+        pattern: "src/oc-evolver.ts",
+        sessionID: "session-3",
+        messageID: "message-1",
+        title: "Edit kernel source",
+        metadata: {},
+        time: {
+          created: Date.now(),
+        },
+      },
+      output,
+    )
+
+    expect(output.status).toBe("ask")
+
+    await expect(
+      hooks["tool.execute.before"]?.(
+        {
+          tool: "apply_patch",
+          sessionID: "session-3",
+          callID: "call-2",
+        },
+        {
+          args: {
+            patchText: [
+              "*** Begin Patch",
+              "*** Update File: src/oc-evolver.ts",
+              "@@",
+              '+export const changed = true',
+              "*** End Patch",
+            ].join("\n"),
+          },
+        },
+      ),
+    ).resolves.toBeUndefined()
+  })
+
 })

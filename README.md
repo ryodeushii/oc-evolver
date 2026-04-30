@@ -33,6 +33,7 @@ The kernel only allows autonomous writes inside these roots:
 - `.opencode/skills/`
 - `.opencode/agent/`
 - `.opencode/commands/`
+- `.opencode/memory/`
 
 The local runtime contract is currently frozen to OpenCode `1.14.29` with native agent directory `agent/`.
 
@@ -48,6 +49,8 @@ The kernel blocks autonomous edits to protected paths, including:
 
 Protected-path denial is enforced both through `permission.ask` and through `tool.execute.before` for `apply_patch`, so the plugin still blocks kernel edits during eval runs that use `--dangerously-skip-permissions`.
 
+When the current workspace is the `oc-evolver` source repo itself, the plugin relaxes that self-protection so the agent can edit `src/oc-evolver.ts` and the rest of the kernel during local development. Installed/runtime usage keeps the normal protections.
+
 ## Kernel tools
 
 The plugin exposes this stable v1 tool surface:
@@ -57,9 +60,15 @@ The plugin exposes this stable v1 tool surface:
 - `evolver_write_skill`
 - `evolver_write_agent`
 - `evolver_write_command`
+- `evolver_write_memory`
 - `evolver_apply_skill`
+- `evolver_apply_memory`
 - `evolver_run_agent`
 - `evolver_rollback`
+
+Memory profiles are versioned markdown artifacts stored under `.opencode/memory/`. They steer session behavior by injecting Basic Memory routing guidance, optional `storage_mode`, and reusable source/query hints into skill and agent composition without copying the underlying Basic Memory note corpus into the kernel registry.
+
+If a session applies a memory profile with `storage_mode: artifact-only`, the plugin denies Basic Memory mutation tools for that session through `tool.execute.before`.
 
 ## Local commands
 

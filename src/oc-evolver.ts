@@ -8,20 +8,23 @@ import { tool, type Plugin } from "@opencode-ai/plugin"
 import runtimeContract from "../eval/runtime-contract.json"
 import { appendAuditEvent, recordPolicyDeniedEvent } from "./kernel/audit.ts"
 import {
+  applyMemoryToSession,
   applySkillToSession,
+  getSessionStorageMode,
   rollbackRevision,
   runAgentInSession,
 } from "./kernel/agent-runtime.ts"
 import { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 import {
+  applyMutationTransaction,
   ensureKernelRuntimePaths,
   loadRegistry,
-  applyMutationTransaction,
   validateRegistryArtifacts,
 } from "./kernel/registry.ts"
 import {
   parseAgentDocument,
   parseCommandDocument,
+  parseMemoryDocument,
   parseSkillDocument,
 } from "./kernel/validate.ts"
 
@@ -33,6 +36,15 @@ type PermissionRequest = {
 }
 
 const MUTATING_PERMISSION_TYPES = new Set(["create", "delete", "edit", "move", "write"])
+const BASIC_MEMORY_MUTATION_TOOLS = new Set([
+  "basic-memory_write_note",
+  "basic-memory_edit_note",
+  "basic-memory_move_note",
+  "basic-memory_delete_note",
+  "basic-memory_canvas",
+  "basic-memory_create_memory_project",
+  "basic-memory_delete_project",
+])
 
 const CONFIG_FILE_NAMES = ["opencode.jsonc", "opencode.json"]
 const CONFIG_PLUGIN_HINTS = ["oc-evolver", "oc-resolver", "github.com/ryodeushii/oc-evolver"]
@@ -83,6 +95,25 @@ function isPluginRegisteredInOpencodeRoot(opencodeRoot: string) {
   return false
 }
 
+function isKernelDevelopmentWorkspace(worktree: string) {
+  const packageJsonPath = join(worktree, "package.json")
+  const sourceFilePath = join(worktree, "src/oc-evolver.ts")
+
+  if (!existsSync(packageJsonPath) || !existsSync(sourceFilePath)) {
+    return false
+  }
+
+  try {
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      name?: unknown
+    }
+
+    return packageJson.name === "oc-evolver"
+  } catch {
+    return false
+  }
+}
+
 function getPermissionPatterns(permission: PermissionRequest) {
   if (!permission.pattern) {
     return []
@@ -122,6 +153,7 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
     const pluginFilePath = pluginEntryPointPath
       ? resolveExplicitPluginFilePath(pluginEntryPointPath)
       : resolvePluginFilePath(ctx)
+    const isDevelopmentWorkspace = isKernelDevelopmentWorkspace(ctx.project.worktree)
 
     await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
 
@@ -139,7 +171,7 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
           description: "Validate a mutable artifact",
           args: {
             scope: tool.schema.enum(["document", "registry"]).optional(),
-            kind: tool.schema.enum(["skill", "agent", "command"]).optional(),
+            kind: tool.schema.enum(["skill", "agent", "command", "memory"]).optional(),
             document: tool.schema.string().optional(),
           },
           async execute(args) {
@@ -163,6 +195,10 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
 
             if (args.kind === "command") {
               parseCommandDocument(args.document)
+            }
+
+            if (args.kind === "memory") {
+              parseMemoryDocument(args.document)
             }
 
             await appendAuditEvent({
@@ -246,6 +282,26 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
             return `wrote command ${args.commandName} at revision ${result.revisionID}`
           },
         }),
+        evolver_write_memory: tool({
+          description: "Write a memory profile",
+          args: {
+            memoryName: tool.schema.string(),
+            document: tool.schema.string(),
+          },
+          async execute(args) {
+            const result = await applyMutationTransaction({
+              pluginFilePath,
+              runtimeContract,
+              mutation: {
+                kind: "memory",
+                name: args.memoryName,
+                document: args.document,
+              },
+            })
+
+            return `wrote memory ${args.memoryName} at revision ${result.revisionID}`
+          },
+        }),
         evolver_apply_skill: tool({
           description: "Inject a skill bundle into session",
           args: {
@@ -261,6 +317,23 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
             })
 
             return `applied skill ${args.skillName}`
+          },
+        }),
+        evolver_apply_memory: tool({
+          description: "Inject a memory profile into session",
+          args: {
+            memoryName: tool.schema.string(),
+          },
+          async execute(args, toolCtx) {
+            await applyMemoryToSession({
+              client: ctx.client,
+              pluginFilePath,
+              runtimeContract,
+              sessionID: toolCtx.sessionID,
+              memoryName: args.memoryName,
+            })
+
+            return `applied memory ${args.memoryName}`
           },
         }),
         evolver_run_agent: tool({
@@ -299,7 +372,7 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
         await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
       },
       "permission.ask": async (permission, output) => {
-        if (!isMutatingPermission(permission)) {
+        if (!isMutatingPermission(permission) || isDevelopmentWorkspace) {
           return
         }
 
@@ -323,7 +396,26 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
         }
       },
       "tool.execute.before": async (input, output) => {
-        if (input.tool !== "apply_patch") {
+        const sessionStorageMode = getSessionStorageMode(input.sessionID)
+
+        if (
+          sessionStorageMode === "artifact-only" &&
+          BASIC_MEMORY_MUTATION_TOOLS.has(input.tool)
+        ) {
+          const detail =
+            "basic memory mutation denied: session storage mode artifact-only forbids Basic Memory writes"
+
+          await recordPolicyDeniedEvent({
+            pluginFilePath,
+            runtimeContract,
+            target: input.tool,
+            detail,
+          })
+
+          throw new Error(detail)
+        }
+
+        if (input.tool !== "apply_patch" || isDevelopmentWorkspace) {
           return
         }
 

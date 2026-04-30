@@ -29,5 +29,6 @@
   "pluginDir": ".opencode/plugins",
   "registryDir": ".opencode/oc-evolver",
   "skillDir": ".opencode/skills",
-  "commandDir": ".opencode/commands"
+  "commandDir": ".opencode/commands",
+  "memoryDir": ".opencode/memory"
 }

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   parseAgentDocument,
   parseCommandDocument,
+  parseMemoryDocument,
   parseSkillDocument,
   validateSkillBundle,
 } from "../../src/kernel/validate.ts"
@@ -34,6 +35,48 @@ description: Rewrite TODO markers in markdown files
     })
   })
 
+  test("parses a valid memory document", () => {
+    expect(
+      parseMemoryDocument(`---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-only
+sources:
+  - memory://memory/config/global
+  - memory://plans/oc-evolver/*
+queries:
+  - oc-evolver memory profile
+---
+
+Prefer Basic Memory notes for durable guidance.
+`),
+    ).toMatchObject({
+      frontmatter: {
+        name: "project-preferences",
+        description: "Shared project memory routing",
+        storage_mode: "memory-only",
+        sources: ["memory://memory/config/global", "memory://plans/oc-evolver/*"],
+        queries: ["oc-evolver memory profile"],
+      },
+      body: expect.stringContaining("Prefer Basic Memory notes"),
+    })
+  })
+
+  test("rejects a memory document with empty sources entries", () => {
+    expect(() =>
+      parseMemoryDocument(`---
+name: project-preferences
+description: Shared project memory routing
+sources:
+  - memory://memory/config/global
+  - ""
+---
+
+Prefer Basic Memory notes for durable guidance.
+`),
+    ).toThrow(/memory.+sources/i)
+  })
+
   test("rejects helper files outside the skill bundle root", () => {
     expect(() =>
       validateSkillBundle({
@@ -61,6 +104,8 @@ Use the helper.
 description: Review markdown changes
 mode: subagent
 model: anthropic/claude-sonnet-4-20250514
+memory:
+  - project-preferences
 permission:
   edit: deny
   bash: ask
@@ -73,6 +118,7 @@ Review markdown changes before they land.
         description: "Review markdown changes",
         mode: "subagent",
         model: "anthropic/claude-sonnet-4-20250514",
+        memory: ["project-preferences"],
         permission: {
           edit: "deny",
           bash: "ask",

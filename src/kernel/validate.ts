@@ -2,9 +2,11 @@ import { basename, posix } from "node:path"
 
 const AGENT_MODES = ["all", "primary", "subagent"] as const
 const PERMISSION_VALUES = ["allow", "ask", "deny"] as const
+const STORAGE_MODES = ["memory-only", "artifact-only", "memory-and-artifact"] as const
 
 type AgentMode = (typeof AGENT_MODES)[number]
 type PermissionValue = (typeof PERMISSION_VALUES)[number]
+export type SessionStorageMode = (typeof STORAGE_MODES)[number]
 
 type MarkdownDocument<TFrontmatter extends Record<string, unknown>> = {
   frontmatter: TFrontmatter
@@ -15,12 +17,14 @@ type MarkdownDocument<TFrontmatter extends Record<string, unknown>> = {
 export type SkillDocument = MarkdownDocument<{
   name: string
   description: string
+  memory?: string[]
 }>
 
 export type AgentDocument = MarkdownDocument<{
   description: string
   mode: AgentMode
   model?: string
+  memory?: string[]
   permission?: Record<string, PermissionValue>
 }>
 
@@ -28,6 +32,14 @@ export type CommandDocument = MarkdownDocument<{
   description: string
   agent?: string
   model?: string
+}>
+
+export type MemoryDocument = MarkdownDocument<{
+  name: string
+  description: string
+  storage_mode?: SessionStorageMode
+  sources?: string[]
+  queries?: string[]
 }>
 
 export type SkillBundleInput = {
@@ -51,11 +63,13 @@ export function parseSkillDocument(document: string): SkillDocument {
   const parsed = parseMarkdownFrontmatter(document, "skill")
   const name = readRequiredString(parsed.frontmatter, "name", "skill")
   const description = readRequiredString(parsed.frontmatter, "description", "skill")
+  const memory = readOptionalStringList(parsed.frontmatter, "memory", "skill")
 
   return {
     frontmatter: {
       name,
       description,
+      ...(memory ? { memory } : {}),
     },
     body: parsed.body,
     raw: parsed.raw,
@@ -88,6 +102,7 @@ export function parseAgentDocument(document: string): AgentDocument {
   }
 
   const model = readOptionalString(parsed.frontmatter, "model", "agent")
+  const memory = readOptionalStringList(parsed.frontmatter, "memory", "agent")
   const permission = readPermissionMap(parsed.frontmatter.permission)
 
   return {
@@ -95,6 +110,7 @@ export function parseAgentDocument(document: string): AgentDocument {
       description,
       mode,
       ...(model ? { model } : {}),
+      ...(memory ? { memory } : {}),
       ...(permission ? { permission } : {}),
     },
     body: parsed.body,
@@ -113,6 +129,39 @@ export function parseCommandDocument(document: string): CommandDocument {
       description,
       ...(agent ? { agent } : {}),
       ...(model ? { model } : {}),
+    },
+    body: parsed.body,
+    raw: parsed.raw,
+  }
+}
+
+export function parseMemoryDocument(document: string): MemoryDocument {
+  const parsed = parseMarkdownFrontmatter(document, "memory")
+  const name = readRequiredString(parsed.frontmatter, "name", "memory")
+  const description = readRequiredString(parsed.frontmatter, "description", "memory")
+  const storageMode = readOptionalString(parsed.frontmatter, "storage_mode", "memory")
+  const sources = readOptionalStringList(parsed.frontmatter, "sources", "memory")
+  const queries = readOptionalStringList(parsed.frontmatter, "queries", "memory")
+
+  let validatedStorageMode: SessionStorageMode | undefined
+
+  if (storageMode) {
+    if (!isSessionStorageMode(storageMode)) {
+      throw new Error(
+        "invalid memory document: storage_mode must be memory-only, artifact-only, or memory-and-artifact",
+      )
+    }
+
+    validatedStorageMode = storageMode
+  }
+
+  return {
+    frontmatter: {
+      name,
+      description,
+      ...(validatedStorageMode ? { storage_mode: validatedStorageMode } : {}),
+      ...(sources ? { sources } : {}),
+      ...(queries ? { queries } : {}),
     },
     body: parsed.body,
     raw: parsed.raw,
@@ -187,6 +236,32 @@ function readOptionalString(
   return value
 }
 
+function readOptionalStringList(
+  frontmatter: Record<string, unknown>,
+  fieldName: string,
+  artifactKind: string,
+) {
+  const value = frontmatter[fieldName]
+
+  if (value === undefined) {
+    return undefined
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`invalid ${artifactKind} document: ${fieldName} must be an array of strings`)
+  }
+
+  return value.map((entry) => {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      throw new Error(
+        `invalid ${artifactKind} document: ${fieldName} entries must be non-empty strings`,
+      )
+    }
+
+    return entry
+  })
+}
+
 function readPermissionMap(value: unknown) {
   if (value === undefined) {
     return undefined
@@ -249,4 +324,8 @@ function isAgentMode(value: string): value is AgentMode {
 
 function isPermissionValue(value: unknown): value is PermissionValue {
   return typeof value === "string" && PERMISSION_VALUES.includes(value as PermissionValue)
+}
+
+function isSessionStorageMode(value: string): value is SessionStorageMode {
+  return STORAGE_MODES.includes(value as SessionStorageMode)
 }

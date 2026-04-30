@@ -45,6 +45,7 @@ export async function ensureAutonomousPathAllowed(
     kernelPaths.skillsRoot,
     kernelPaths.agentsRoot,
     kernelPaths.commandsRoot,
+    kernelPaths.memoriesRoot,
   ]
   const canonicalAllowedRoots = await Promise.all(allowedRoots.map(canonicalizePath))
 

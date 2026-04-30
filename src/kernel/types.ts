@@ -7,6 +7,7 @@ export type OCEvolverRuntimeContract = {
   registryDir: string
   skillDir: string
   commandDir: string
+  memoryDir: string
 }
 
 export type OCEvolverKernelPaths = {
@@ -17,5 +18,6 @@ export type OCEvolverKernelPaths = {
   skillsRoot: string
   agentsRoot: string
   commandsRoot: string
+  memoriesRoot: string
   protectedFiles: string[]
 }

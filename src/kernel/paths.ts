@@ -20,6 +20,7 @@ export function resolveKernelPaths(
     skillsRoot: resolve(opencodeRoot, relativeToOpencode(runtimeContract.skillDir)),
     agentsRoot: resolve(opencodeRoot, relativeToOpencode(`.opencode/${runtimeContract.nativeAgentDir}`)),
     commandsRoot: resolve(opencodeRoot, relativeToOpencode(runtimeContract.commandDir)),
+    memoriesRoot: resolve(opencodeRoot, relativeToOpencode(runtimeContract.memoryDir)),
     protectedFiles: [
       resolve(opencodeRoot, "opencode.json"),
       resolve(opencodeRoot, "opencode.jsonc"),

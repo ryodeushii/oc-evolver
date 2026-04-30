@@ -6,6 +6,7 @@ import { appendAuditEvent } from "./audit.ts"
 import {
   materializeAgentDocument,
   materializeCommandDocument,
+  materializeMemoryDocument,
   materializeSkillBundle,
 } from "./materialize.ts"
 import { ensureAutonomousPathAllowed } from "./policy.ts"
@@ -14,12 +15,13 @@ import type { OCEvolverRuntimeContract } from "./types.ts"
 import {
   parseAgentDocument,
   parseCommandDocument,
+  parseMemoryDocument,
   parseSkillDocument,
   validateSkillBundle,
   type SkillBundleFileInput,
 } from "./validate.ts"
 
-type RegistryKind = "skill" | "agent" | "command"
+type RegistryKind = "skill" | "agent" | "command" | "memory"
 
 export type InvalidArtifact = {
   target: string
@@ -54,10 +56,15 @@ type CommandRegistryEntry = RegistryEntryBase & {
   kind: "command"
 }
 
+type MemoryRegistryEntry = RegistryEntryBase & {
+  kind: "memory"
+}
+
 export type OCEvolverRegistry = {
   skills: Record<string, SkillRegistryEntry>
   agents: Record<string, AgentRegistryEntry>
   commands: Record<string, CommandRegistryEntry>
+  memories: Record<string, MemoryRegistryEntry>
   quarantine: Record<string, QuarantineEntry>
   currentRevision: string | null
 }
@@ -77,6 +84,7 @@ type RevisionEntries = {
   skills: Record<string, SkillRevisionEntry>
   agents: Record<string, TextRevisionEntry>
   commands: Record<string, TextRevisionEntry>
+  memories: Record<string, TextRevisionEntry>
 }
 
 type RevisionRecord = {
@@ -101,6 +109,11 @@ type MutationInput =
     }
   | {
       kind: "command"
+      name: string
+      document: string
+    }
+  | {
+      kind: "memory"
       name: string
       document: string
     }
@@ -131,6 +144,7 @@ export async function ensureKernelRuntimePaths(
     mkdir(kernelPaths.skillsRoot, { recursive: true }),
     mkdir(kernelPaths.agentsRoot, { recursive: true }),
     mkdir(kernelPaths.commandsRoot, { recursive: true }),
+    mkdir(kernelPaths.memoriesRoot, { recursive: true }),
   ])
 
   const registryPath = resolveRegistryPath(pluginFilePath, runtimeContract)
@@ -179,6 +193,15 @@ export async function validateRegistryArtifacts(
     kind: "command",
     shouldValidatePath: (filePath) => filePath.endsWith(".md"),
     validateDocument: parseCommandDocument,
+    invalid,
+  })
+  await collectInvalidArtifacts({
+    pluginFilePath,
+    runtimeContract,
+    rootPath: kernelPaths.memoriesRoot,
+    kind: "memory",
+    shouldValidatePath: (filePath) => filePath.endsWith(".md"),
+    validateDocument: parseMemoryDocument,
     invalid,
   })
 
@@ -257,6 +280,7 @@ export async function applyMutationTransaction(input: {
     skills: { ...currentRegistry.skills },
     agents: { ...currentRegistry.agents },
     commands: { ...currentRegistry.commands },
+    memories: { ...currentRegistry.memories },
     quarantine: { ...currentRegistry.quarantine },
   }
 
@@ -270,6 +294,10 @@ export async function applyMutationTransaction(input: {
 
   if (mutationState.registryEntry.kind === "command") {
     nextRegistry.commands[mutationState.registryEntry.name] = mutationState.registryEntry
+  }
+
+  if (mutationState.registryEntry.kind === "memory") {
+    nextRegistry.memories[mutationState.registryEntry.name] = mutationState.registryEntry
   }
 
   const revisionRecord: RevisionRecord = {
@@ -442,6 +470,41 @@ async function materializeMutation(input: {
     }
   }
 
+  if (input.mutation.kind === "memory") {
+    const memoryDocument = parseMemoryDocument(input.mutation.document)
+    const materialized = await materializeMemoryDocument({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      memoryName: input.mutation.name,
+      document: input.mutation.document,
+    })
+    const contentHash = hashTextDocument(memoryDocument.raw)
+
+    input.entries.memories[input.mutation.name] = {
+      document: memoryDocument.raw,
+      contentHash,
+    }
+
+    return {
+      auditTarget: toWorkspaceRelativePath(
+        input.pluginFilePath,
+        input.runtimeContract,
+        materialized.filePath,
+      ),
+      registryEntry: {
+        kind: "memory" as const,
+        name: input.mutation.name,
+        nativePath: toWorkspaceRelativePath(
+          input.pluginFilePath,
+          input.runtimeContract,
+          materialized.filePath,
+        ),
+        revisionID: input.revisionID,
+        contentHash,
+      },
+    }
+  }
+
   const commandDocument = parseCommandDocument(input.mutation.document)
   const materialized = await materializeCommandDocument({
     pluginFilePath: input.pluginFilePath,
@@ -510,6 +573,15 @@ async function materializeRevisionEntries(input: {
       document: command.document,
     })
   }
+
+  for (const [name, memory] of Object.entries(input.entries.memories)) {
+    await materializeMemoryDocument({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      memoryName: name,
+      document: memory.document,
+    })
+  }
 }
 
 async function loadRevision(
@@ -552,6 +624,7 @@ function emptyRegistry(): OCEvolverRegistry {
     skills: {},
     agents: {},
     commands: {},
+    memories: {},
     quarantine: {},
     currentRevision: null,
   }
@@ -562,6 +635,7 @@ function normalizeRegistry(rawRegistry: Partial<OCEvolverRegistry>): OCEvolverRe
     skills: rawRegistry.skills ?? {},
     agents: rawRegistry.agents ?? {},
     commands: rawRegistry.commands ?? {},
+    memories: rawRegistry.memories ?? {},
     quarantine: rawRegistry.quarantine ?? {},
     currentRevision: rawRegistry.currentRevision ?? null,
   }
@@ -572,6 +646,7 @@ function emptyRevisionEntries(): RevisionEntries {
     skills: {},
     agents: {},
     commands: {},
+    memories: {},
   }
 }
 
@@ -580,6 +655,7 @@ function cloneRevisionEntries(entries: RevisionEntries): RevisionEntries {
     skills: structuredClone(entries.skills),
     agents: structuredClone(entries.agents),
     commands: structuredClone(entries.commands),
+    memories: structuredClone(entries.memories),
   }
 }
 
@@ -609,6 +685,10 @@ function auditActionForMutation(kind: MutationInput["kind"]) {
 
   if (kind === "agent") {
     return "write_agent"
+  }
+
+  if (kind === "memory") {
+    return "write_memory"
   }
 
   return "write_command"

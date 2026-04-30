@@ -22,6 +22,7 @@ describe("kernel path policy", () => {
     await mkdir(join(workspaceRoot, ".opencode/skills"), { recursive: true })
     await mkdir(join(workspaceRoot, ".opencode/agent"), { recursive: true })
     await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
+    await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
     await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
     await writeFile(pluginFilePath, "export const plugin = true\n")
   })
@@ -39,6 +40,7 @@ describe("kernel path policy", () => {
       skillsRoot: join(workspaceRoot, ".opencode/skills"),
       agentsRoot: join(workspaceRoot, ".opencode/agent"),
       commandsRoot: join(workspaceRoot, ".opencode/commands"),
+      memoriesRoot: join(workspaceRoot, ".opencode/memory"),
       protectedFiles: [
         join(workspaceRoot, ".opencode/opencode.json"),
         join(workspaceRoot, ".opencode/opencode.jsonc"),

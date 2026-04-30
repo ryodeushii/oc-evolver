@@ -27,6 +27,7 @@ describe("registry transactions", () => {
         skills: {},
         agents: {},
         commands: {},
+        memories: {},
         quarantine: {},
         currentRevision: null,
       }, null, 2),
@@ -42,6 +43,7 @@ describe("registry transactions", () => {
       skills: {},
       agents: {},
       commands: {},
+      memories: {},
       quarantine: {},
       currentRevision: null,
     })
@@ -106,6 +108,68 @@ Use the helper.
       status: "success",
       revisionID: result.revisionID,
       target: ".opencode/skills/fixture-refactor/SKILL.md",
+    })
+  })
+
+  test("records a memory mutation in registry metadata and a revision snapshot", async () => {
+    const result = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "memory",
+        name: "project-preferences",
+        document: `---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+  - memory://plans/oc-evolver/*
+queries:
+  - oc-evolver memory profiles
+---
+
+Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance.
+`,
+      },
+    })
+
+    expect(result.revisionID).toBeString()
+    expect(result.registry.currentRevision).toBe(result.revisionID)
+    expect(result.registry.memories["project-preferences"]).toMatchObject({
+      kind: "memory",
+      name: "project-preferences",
+      nativePath: ".opencode/memory/project-preferences.md",
+      revisionID: result.revisionID,
+    })
+    expect(result.registry.memories["project-preferences"]?.contentHash).toMatch(/^[a-f0-9]{64}$/)
+
+    const revision = JSON.parse(
+      await readFile(
+        join(workspaceRoot, `.opencode/oc-evolver/revisions/${result.revisionID}.json`),
+        "utf8",
+      ),
+    )
+
+    expect(revision.entries.memories["project-preferences"].document).toContain(
+      "name: project-preferences",
+    )
+    expect(revision.entries.memories["project-preferences"].contentHash).toBe(
+      result.registry.memories["project-preferences"]?.contentHash,
+    )
+
+    const auditLines = (
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+
+    expect(auditLines.at(-1)).toMatchObject({
+      action: "write_memory",
+      status: "success",
+      revisionID: result.revisionID,
+      target: ".opencode/memory/project-preferences.md",
     })
   })
 
