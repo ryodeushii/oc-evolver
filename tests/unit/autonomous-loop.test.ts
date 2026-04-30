@@ -5,13 +5,17 @@ import { join } from "node:path"
 
 import runtimeContract from "../../eval/runtime-contract.json"
 import {
+  configureAutonomousLoop,
   DEFAULT_AUTONOMOUS_LOOP_INTERVAL_MS,
+  DEFAULT_AUTONOMOUS_LOOP_EVALUATION_SCENARIOS,
+  getAutonomousLoopStatus,
   resolveAutonomousLoopSchedulePolicy,
+  resolveAutonomousLoopLockPath,
   runAutonomousIteration,
   resolveAutonomousLoopStatePath,
   startAutonomousLoopWorker,
 } from "../../src/kernel/autonomous-loop.ts"
-import { applyMutationTransaction, loadRegistry } from "../../src/kernel/registry.ts"
+import { applyMutationTransaction, loadRegistry, promotePendingRevision } from "../../src/kernel/registry.ts"
 
 describe("autonomous loop", () => {
   let repoRoot: string
@@ -30,6 +34,43 @@ describe("autonomous loop", () => {
     await rm(repoRoot, { recursive: true, force: true })
   })
 
+  test("configures autonomous objectives, dedupes them, and exposes loop status", async () => {
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      repoRoot,
+      intervalMs: 120_000,
+      evaluationScenarios: ["autonomous-run"],
+      objectivePrompts: [
+        "Review the registry lifecycle.",
+        "Review the registry lifecycle.",
+        "Harden autonomous scheduling.",
+      ],
+      replaceObjectives: true,
+      enabled: true,
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(status.config.enabled).toBe(true)
+    expect(status.config.intervalMs).toBe(120_000)
+    expect(status.config.evaluationScenarios).toEqual(["autonomous-run"])
+    expect(status.objectives).toHaveLength(2)
+    expect(status.objectives[0]).toMatchObject({
+      prompt: "Review the registry lifecycle.",
+      status: "pending",
+      attempts: 0,
+    })
+    expect(status.objectives[1]).toMatchObject({
+      prompt: "Harden autonomous scheduling.",
+      status: "pending",
+      attempts: 0,
+    })
+  })
+
   test("promotes a pending revision after successful verification and evaluation and persists loop state", async () => {
     const commands: string[][] = []
     const evalScenarios: string[] = []
@@ -40,7 +81,7 @@ describe("autonomous loop", () => {
       runtimeContract,
       prompt: "Improve the README with the oc-evolver loop.",
       verificationCommands: [["bun", "run", "typecheck"], ["bun", "run", "test:unit"]],
-      evaluationScenarios: ["smoke"],
+      evaluationScenarios: DEFAULT_AUTONOMOUS_LOOP_EVALUATION_SCENARIOS,
       executeCommand: async ({ command }) => {
         commands.push(command)
 
@@ -88,8 +129,14 @@ describe("autonomous loop", () => {
       await readFile(resolveAutonomousLoopStatePath(pluginFilePath, runtimeContract), "utf8"),
     ) as {
       lastSessionID: string | null
-      latestLearning: string | null
-      iterations: Array<{ decision: string; promotedRevisionID?: string | null }>
+      latestLearning: { summary: string; remainingObjectives: string[] } | null
+      iterations: Array<{
+        decision: string
+        promotedRevisionID?: string | null
+        verification: Array<{ command: string[]; exitCode: number }>
+        evaluations: Array<{ scenarioName: string; exitCode: number }>
+        changedArtifacts: string[]
+      }>
     }
 
     expect(result.decision).toBe("promoted")
@@ -103,15 +150,24 @@ describe("autonomous loop", () => {
     ])
     expect(commands[1]).toEqual(["bun", "run", "typecheck"])
     expect(commands[2]).toEqual(["bun", "run", "test:unit"])
-    expect(evalScenarios).toEqual(["smoke"])
+    expect(evalScenarios).toEqual(DEFAULT_AUTONOMOUS_LOOP_EVALUATION_SCENARIOS)
     expect(registry.currentRevision).toBeString()
     expect(registry.pendingRevision).toBeNull()
     expect(loopState.lastSessionID).toBe("session-1")
-    expect(loopState.latestLearning).toContain("promoted")
+    expect(loopState.latestLearning?.summary).toContain("promoted")
     expect(loopState.iterations.at(-1)).toMatchObject({
       decision: "promoted",
       promotedRevisionID: registry.currentRevision,
+      verification: [
+        { command: ["bun", "run", "typecheck"], exitCode: 0 },
+        { command: ["bun", "run", "test:unit"], exitCode: 0 },
+      ],
+      evaluations: DEFAULT_AUTONOMOUS_LOOP_EVALUATION_SCENARIOS.map((scenarioName) => ({
+        scenarioName,
+        exitCode: 0,
+      })),
     })
+    expect(loopState.iterations.at(-1)?.changedArtifacts).toContain("command:autonomous-review")
   })
 
   test("rejects a pending revision when verification fails and reuses the last session with learned context", async () => {
@@ -178,7 +234,7 @@ describe("autonomous loop", () => {
       await readFile(resolveAutonomousLoopStatePath(pluginFilePath, runtimeContract), "utf8"),
     ) as {
       lastSessionID: string | null
-      latestLearning: string | null
+      latestLearning: { summary: string } | null
       iterations: Array<{ decision: string; rejectionReason?: string | null }>
     }
 
@@ -187,7 +243,7 @@ describe("autonomous loop", () => {
     expect(registry.currentRevision).toBeNull()
     expect(registry.pendingRevision).toBeNull()
     expect(loopState.lastSessionID).toBe("session-2")
-    expect(loopState.latestLearning).toContain("verification failed")
+    expect(loopState.latestLearning?.summary).toContain("verification failed")
     expect(loopState.iterations.at(-1)).toMatchObject({
       decision: "rejected",
       rejectionReason: expect.stringContaining("typecheck"),
@@ -206,10 +262,9 @@ describe("autonomous loop", () => {
       {
         repoRoot,
         pluginFilePath,
-        prompt: "Keep improving the project.",
         intervalMs: 60_000,
         verificationCommands: [["bun", "run", "typecheck"]],
-        evaluationScenarios: ["smoke"],
+        evaluationScenarios: ["autonomous-run"],
       },
       (scriptURL, options) => {
         receivedScript = scriptURL
@@ -230,12 +285,104 @@ describe("autonomous loop", () => {
     expect(capturedOptions.workerData).toMatchObject({
       repoRoot,
       pluginFilePath,
-      prompt: "Keep improving the project.",
       intervalMs: 60_000,
       verificationCommands: [["bun", "run", "typecheck"]],
-      evaluationScenarios: ["smoke"],
+      evaluationScenarios: ["autonomous-run"],
     })
     expect(worker).toBeDefined()
+  })
+
+  test("skips a new iteration when the loop lock is already held", async () => {
+    await mkdir(resolveAutonomousLoopLockPath(pluginFilePath, runtimeContract), { recursive: true })
+    const executedCommands: string[][] = []
+
+    const result = await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      prompt: "Try to improve the loop.",
+      executeCommand: async ({ command }) => {
+        executedCommands.push(command)
+
+        return {
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+    })
+
+    expect(result.decision).toBe("skipped_locked")
+    expect(executedCommands).toEqual([])
+    expect(result.rejectionReason).toContain("lock")
+  })
+
+  test("rolls back a promoted revision when post-promotion verification regresses an accepted state", async () => {
+    const first = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "autonomous-review",
+        document: `---
+description: First autonomous review flow
+---
+
+Review README.md once.
+`,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    let verificationRuns = 0
+
+    const result = await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      prompt: "Improve the autonomous review command.",
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: `---
+description: Second autonomous review flow
+---
+
+Review README.md twice.
+`,
+            },
+          })
+
+          return {
+            stdout: '{"sessionID":"session-rollback"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        verificationRuns += 1
+
+        return {
+          stdout: verificationRuns > 2 ? "regressed after promote" : "verification ok",
+          stderr: "",
+          exitCode: verificationRuns > 2 ? 1 : 0,
+        }
+      },
+    })
+
+    const registry = await loadRegistry(pluginFilePath, runtimeContract)
+
+    expect(result.decision).toBe("rolled_back")
+    expect(result.promotedRevisionID).not.toBeNull()
+    expect(result.rejectionReason).toContain("post-promotion verification failed")
+    expect(registry.currentRevision).toBe(first.revisionID)
+    expect(registry.pendingRevision).toBeNull()
   })
 
   test("defaults explicit worker mode to a real recurring schedule", () => {

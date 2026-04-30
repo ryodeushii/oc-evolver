@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit",
     "test:unit": "bun test",
     "autonomous:run": "bun run scripts/run-autonomous-loop.ts",
+    "eval:autonomous-run": "bun run scripts/run-eval.ts autonomous-run",
     "eval:smoke": "bun run scripts/run-eval.ts smoke",
     "eval:all": "bun run scripts/run-eval.ts all"
   },

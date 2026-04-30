@@ -5,6 +5,7 @@ import { join, resolve } from "node:path"
 import { tool, type Plugin } from "@opencode-ai/plugin"
 
 import runtimeContract from "../eval/runtime-contract.json"
+import { runEvaluationScenario } from "../scripts/run-eval.ts"
 import { appendAuditEvent, recordPolicyDeniedEvent } from "./kernel/audit.ts"
 import {
   applyMemoryToSession,
@@ -15,12 +16,21 @@ import {
   runAgentInSession,
   runCommandInSession,
 } from "./kernel/agent-runtime.ts"
+import {
+  configureAutonomousLoop,
+  getAutonomousLoopStatus,
+  runAutonomousIteration,
+  setAutonomousLoopEnabled,
+  setAutonomousLoopPaused,
+} from "./kernel/autonomous-loop.ts"
 import { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 import {
   applyMutationTransaction,
+  deleteRegistryArtifact,
   ensureKernelRuntimePaths,
   loadRegistry,
   promotePendingRevision,
+  pruneRegistryRevisions,
   rejectPendingRevision,
   validateRegistryArtifacts,
 } from "./kernel/registry.ts"
@@ -432,6 +442,119 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
             return `wrote memory ${args.memoryName} at revision ${result.revisionID}`
           },
         }),
+        evolver_autonomous_status: tool({
+          description: "Show autonomous loop status",
+          args: {},
+          async execute() {
+            return JSON.stringify(
+              await getAutonomousLoopStatus({
+                pluginFilePath,
+                runtimeContract,
+              }),
+              null,
+              2,
+            )
+          },
+        }),
+        evolver_autonomous_configure: tool({
+          description: "Configure autonomous loop objectives and defaults",
+          args: {
+            intervalMs: tool.schema.number().optional(),
+            verificationCommands: tool.schema.array(tool.schema.array(tool.schema.string())).optional(),
+            evaluationScenarios: tool.schema.array(tool.schema.string()).optional(),
+            objectivePrompts: tool.schema.array(tool.schema.string()).optional(),
+            replaceObjectives: tool.schema.boolean().optional(),
+            enabled: tool.schema.boolean().optional(),
+            paused: tool.schema.boolean().optional(),
+          },
+          async execute(args) {
+            return JSON.stringify(
+              await configureAutonomousLoop({
+                pluginFilePath,
+                runtimeContract,
+                intervalMs: args.intervalMs,
+                verificationCommands: args.verificationCommands,
+                evaluationScenarios: args.evaluationScenarios,
+                objectivePrompts: args.objectivePrompts,
+                replaceObjectives: args.replaceObjectives,
+                enabled: args.enabled,
+                paused: args.paused,
+              }),
+              null,
+              2,
+            )
+          },
+        }),
+        evolver_autonomous_start: tool({
+          description: "Enable autonomous loop scheduling",
+          args: {},
+          async execute() {
+            return JSON.stringify(
+              await setAutonomousLoopEnabled({
+                pluginFilePath,
+                runtimeContract,
+                enabled: true,
+                paused: false,
+              }),
+              null,
+              2,
+            )
+          },
+        }),
+        evolver_autonomous_pause: tool({
+          description: "Pause scheduled autonomous loop runs",
+          args: {},
+          async execute() {
+            return JSON.stringify(
+              await setAutonomousLoopPaused({
+                pluginFilePath,
+                runtimeContract,
+                paused: true,
+              }),
+              null,
+              2,
+            )
+          },
+        }),
+        evolver_autonomous_resume: tool({
+          description: "Resume scheduled autonomous loop runs",
+          args: {},
+          async execute() {
+            return JSON.stringify(
+              await setAutonomousLoopEnabled({
+                pluginFilePath,
+                runtimeContract,
+                enabled: true,
+                paused: false,
+              }),
+              null,
+              2,
+            )
+          },
+        }),
+        evolver_autonomous_run: tool({
+          description: "Run one autonomous loop iteration",
+          args: {
+            prompt: tool.schema.string().optional(),
+          },
+          async execute(args) {
+            return JSON.stringify(
+              await runAutonomousIteration({
+                repoRoot: ctx.project.worktree,
+                pluginFilePath,
+                runtimeContract,
+                prompt: args.prompt,
+                runEvaluationScenario: ({ repoRoot, scenarioName }) =>
+                  runEvaluationScenario({
+                    repoRoot,
+                    scenarioName,
+                  }),
+              }),
+              null,
+              2,
+            )
+          },
+        }),
         evolver_apply_skill: tool({
           description: "Inject a skill bundle into session",
           args: {
@@ -473,16 +596,18 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
             prompt: tool.schema.string(),
           },
           async execute(args, toolCtx) {
-            await runAgentInSession({
-              client: ctx.client,
-              pluginFilePath,
-              runtimeContract,
-              sessionID: toolCtx.sessionID,
-              agentName: args.agentName,
-              prompt: args.prompt,
-            })
-
-            return `ran agent ${args.agentName}`
+            return JSON.stringify(
+              await runAgentInSession({
+                client: ctx.client,
+                pluginFilePath,
+                runtimeContract,
+                sessionID: toolCtx.sessionID,
+                agentName: args.agentName,
+                prompt: args.prompt,
+              }),
+              null,
+              2,
+            )
           },
         }),
         evolver_run_command: tool({
@@ -492,16 +617,51 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
             prompt: tool.schema.string(),
           },
           async execute(args, toolCtx) {
-            await runCommandInSession({
-              client: ctx.client,
-              pluginFilePath,
-              runtimeContract,
-              sessionID: toolCtx.sessionID,
-              commandName: args.commandName,
-              prompt: args.prompt,
-            })
-
-            return `ran command ${args.commandName}`
+            return JSON.stringify(
+              await runCommandInSession({
+                client: ctx.client,
+                pluginFilePath,
+                runtimeContract,
+                sessionID: toolCtx.sessionID,
+                commandName: args.commandName,
+                prompt: args.prompt,
+              }),
+              null,
+              2,
+            )
+          },
+        }),
+        evolver_delete_artifact: tool({
+          description: "Delete a registered artifact into a pending revision",
+          args: {
+            kind: tool.schema.enum(["skill", "agent", "command", "memory"]),
+            name: tool.schema.string(),
+          },
+          async execute(args) {
+            return JSON.stringify(
+              await deleteRegistryArtifact({
+                pluginFilePath,
+                runtimeContract,
+                kind: args.kind,
+                name: args.name,
+              }),
+              null,
+              2,
+            )
+          },
+        }),
+        evolver_prune: tool({
+          description: "Prune obsolete revision artifacts",
+          args: {},
+          async execute() {
+            return JSON.stringify(
+              await pruneRegistryRevisions({
+                pluginFilePath,
+                runtimeContract,
+              }),
+              null,
+              2,
+            )
           },
         }),
         evolver_rollback: tool({

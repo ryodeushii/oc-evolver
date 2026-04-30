@@ -18,6 +18,8 @@ export type AuditEvent = {
     | "apply_memory"
     | "run_agent"
     | "run_command"
+    | "delete_artifact"
+    | "prune"
     | "promote"
     | "reject"
     | "rollback"

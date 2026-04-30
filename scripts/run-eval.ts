@@ -43,7 +43,7 @@ type EvaluationTurn = {
   sessionID: string | null
 }
 
-const DEFAULT_SCENARIOS = [
+export const DEFAULT_SCENARIOS = [
   "smoke",
   "create-skill",
   "create-agent",
@@ -52,6 +52,7 @@ const DEFAULT_SCENARIOS = [
   "invalid-artifact",
   "memory-guided-write",
   "artifact-only-deny",
+  "autonomous-run",
   "rollback",
 ]
 
@@ -471,6 +472,27 @@ async function assertScenarioArtifacts(input: {
 
       if (registry.pendingRevision !== null) {
         throw new Error("scenario rollback left a pending revision behind")
+      }
+
+      return
+    }
+    case "autonomous-run": {
+      assertAuditAction(auditEvents, "promote", "scenario autonomous-run missing promote audit event")
+
+      if (!input.changedFiles.includes(".opencode/oc-evolver/autonomous-loop.json")) {
+        throw new Error("scenario autonomous-run missing persisted autonomous loop state")
+      }
+
+      if (registry.currentRevision === null || registry.currentRevision === undefined) {
+        throw new Error("scenario autonomous-run did not leave an accepted revision")
+      }
+
+      const loopState = JSON.parse(
+        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"), "utf8"),
+      ) as { latestLearning?: { summary?: string } | null }
+
+      if (!loopState.latestLearning?.summary?.includes("promoted")) {
+        throw new Error("scenario autonomous-run missing promoted learning summary")
       }
 
       return

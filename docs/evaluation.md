@@ -6,6 +6,7 @@ The evaluation harness runs OpenCode against a fresh temp workspace copied from 
 
 Primary commands:
 
+- `bun run eval:autonomous-run`
 - `bun run eval:smoke`
 - `bun run eval:all`
 - `bun run scripts/run-eval.ts <scenario>`
@@ -20,6 +21,7 @@ The runner currently executes these default scenarios:
 - `invalid-artifact`
 - `memory-guided-write`
 - `artifact-only-deny`
+- `autonomous-run`
 - `rollback`
 
 Pending revision lifecycle matters during evaluation: `evolver_write_*` tools stage a pending revision, while `evolver_promote` and `evolver_reject` decide whether that revision becomes the accepted registry state. `evolver_check` is the plugin-native health check for invalid artifacts plus pending revision state.
@@ -108,8 +110,17 @@ Key files:
 - Expected artifact signal:
   - `.opencode/memory/artifact-only-session.md`
   - persisted session state under `.opencode/oc-evolver/sessions/`
-  - `audit.ndjson` contains `write_memory`, `apply_memory`, and `policy_denied`
-  - the blocked Basic Memory write leaves no durable note artifact in the fixture workspace
+- `audit.ndjson` contains `write_memory`, `apply_memory`, and `policy_denied`
+- the blocked Basic Memory write leaves no durable note artifact in the fixture workspace
+
+### `autonomous-run`
+
+- Runs one persisted autonomous-loop iteration against a queued objective
+- Expected artifact signal:
+  - `.opencode/oc-evolver/autonomous-loop.json`
+  - `audit.ndjson` contains `promote`
+  - `registry.json.currentRevision` is non-null
+  - `autonomous-loop.json.latestLearning.summary` describes a promoted iteration
 
 ### `rollback`
 
@@ -178,6 +189,7 @@ This section is updated from the latest full sweep artifacts.
   - `exitCode: 0`
   - `turnCount: 2`
   - `changedFiles: 5`
+- `autonomous-run`: pending refresh after the next full sweep
 - `rollback`: `eval/results/rollback/2026-04-30T15-46-10.387Z/`
   - `exitCode: 0`
   - `turnCount: 3`

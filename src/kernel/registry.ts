@@ -119,6 +119,8 @@ type MutationInput =
       document: string
     }
 
+export type RegistryArtifactKind = "skill" | "agent" | "command" | "memory"
+
 export async function loadRegistry(
   pluginFilePath: string,
   runtimeContract: OCEvolverRuntimeContract,
@@ -530,6 +532,140 @@ export async function rollbackLatestRevision(
   return {
     currentRevisionID: previousRevision.revisionID,
     rolledBackRevisionID: currentRevision.revisionID,
+  }
+}
+
+export async function deleteRegistryArtifact(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  kind: RegistryArtifactKind
+  name: string
+}) {
+  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
+  const currentRegistry = await loadRegistry(input.pluginFilePath, input.runtimeContract)
+  const previousRevisionID = currentRegistry.pendingRevision ?? currentRegistry.currentRevision
+  const previousRevision = previousRevisionID
+    ? await loadRevision(input.pluginFilePath, input.runtimeContract, previousRevisionID)
+    : null
+
+  if (!previousRevision) {
+    throw new Error(`cannot delete ${input.kind} ${input.name} without an existing revision`)
+  }
+
+  const nextEntries = cloneRevisionEntries(previousRevision.entries)
+  const deleted = deleteRevisionEntry(nextEntries, input.kind, input.name)
+
+  if (!deleted) {
+    throw new Error(`unknown ${input.kind}: ${input.name}`)
+  }
+
+  const revisionID = randomUUID()
+  const nextRegistry = buildRegistryWithEntries({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    registry: {
+      ...currentRegistry,
+      currentRevision: currentRegistry.currentRevision,
+      pendingRevision: revisionID,
+    },
+    revisionID,
+    entries: nextEntries,
+  })
+  const revisionRecord: RevisionRecord = {
+    revisionID,
+    previousRevisionID,
+    previousAcceptedRevisionID: currentRegistry.pendingRevision
+      ? previousRevision.previousAcceptedRevisionID ?? currentRegistry.currentRevision
+      : currentRegistry.currentRevision,
+    createdAt: new Date().toISOString(),
+    entries: nextEntries,
+  }
+
+  await mkdir(join(kernelPaths.registryRoot, "revisions"), { recursive: true })
+  await writeJSONAtomically({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    path: join(kernelPaths.registryRoot, "revisions", `${revisionID}.json`),
+    value: revisionRecord,
+  })
+  await syncRegistryArtifacts({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    currentRegistry,
+    nextEntries,
+  })
+  await saveRegistry(input.pluginFilePath, input.runtimeContract, nextRegistry)
+  await appendAuditEvent({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    event: {
+      action: "delete_artifact",
+      status: "success",
+      revisionID,
+      target: `${input.kind}:${input.name}`,
+      detail: "deleted artifact into pending revision",
+    },
+  })
+
+  return {
+    revisionID,
+    deleted: `${input.kind}:${input.name}`,
+    registry: nextRegistry,
+  }
+}
+
+export async function pruneRegistryRevisions(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+}) {
+  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
+  const revisionsRoot = join(kernelPaths.registryRoot, "revisions")
+  const registry = await loadRegistry(input.pluginFilePath, input.runtimeContract)
+  let revisionFileNames: string[] = []
+
+  try {
+    revisionFileNames = (await readdir(revisionsRoot)).filter((entry) => entry.endsWith(".json"))
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+      throw error
+    }
+  }
+
+  const keepRevisionIDs = await collectReachableRevisionIDs({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    seedRevisionIDs: [registry.currentRevision, registry.pendingRevision],
+  })
+  const removedRevisionIDs: string[] = []
+
+  for (const revisionFileName of revisionFileNames) {
+    const revisionID = revisionFileName.slice(0, -".json".length)
+
+    if (keepRevisionIDs.has(revisionID)) {
+      continue
+    }
+
+    await rm(join(revisionsRoot, revisionFileName), { force: true })
+    removedRevisionIDs.push(revisionID)
+  }
+
+  await appendAuditEvent({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    event: {
+      action: "prune",
+      status: "success",
+      target: ".opencode/oc-evolver/revisions",
+      detail:
+        removedRevisionIDs.length > 0
+          ? `pruned ${removedRevisionIDs.length} obsolete revisions`
+          : "no obsolete revisions to prune",
+    },
+  })
+
+  return {
+    removedRevisionIDs,
+    keptRevisionIDs: [...keepRevisionIDs].sort(),
   }
 }
 
@@ -946,6 +1082,59 @@ function emptyRevisionEntries(): RevisionEntries {
     commands: {},
     memories: {},
   }
+}
+
+function deleteRevisionEntry(entries: RevisionEntries, kind: RegistryArtifactKind, name: string) {
+  if (kind === "skill") {
+    return delete entries.skills[name]
+  }
+
+  if (kind === "agent") {
+    return delete entries.agents[name]
+  }
+
+  if (kind === "command") {
+    return delete entries.commands[name]
+  }
+
+  return delete entries.memories[name]
+}
+
+async function collectReachableRevisionIDs(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  seedRevisionIDs: Array<string | null>
+}) {
+  const keep = new Set<string>()
+  const queue = input.seedRevisionIDs.filter((revisionID): revisionID is string => Boolean(revisionID))
+
+  while (queue.length > 0) {
+    const revisionID = queue.shift()
+
+    if (!revisionID || keep.has(revisionID)) {
+      continue
+    }
+
+    keep.add(revisionID)
+
+    try {
+      const revision = await loadRevision(input.pluginFilePath, input.runtimeContract, revisionID)
+
+      if (revision.previousRevisionID) {
+        queue.push(revision.previousRevisionID)
+      }
+
+      if (revision.previousAcceptedRevisionID) {
+        queue.push(revision.previousAcceptedRevisionID)
+      }
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+        throw error
+      }
+    }
+  }
+
+  return keep
 }
 
 function cloneRevisionEntries(entries: RevisionEntries): RevisionEntries {

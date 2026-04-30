@@ -6,8 +6,10 @@ import { tmpdir } from "node:os"
 import runtimeContract from "../../eval/runtime-contract.json"
 import {
   applyMutationTransaction,
+  deleteRegistryArtifact,
   loadRegistry,
   promotePendingRevision,
+  pruneRegistryRevisions,
   rejectPendingRevision,
   rollbackLatestRevision,
   saveRegistry,
@@ -343,5 +345,80 @@ Review SUMMARY.md.
       revisionID: first.revisionID,
       rolledBackRevisionID: second.revisionID,
     })
+  })
+
+  test("deletes a registered artifact into a pending revision and removes it from the workspace", async () => {
+    const first = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "review-markdown",
+        document: `---
+description: First review flow
+---
+
+Review README.md.
+`,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    const deletion = await deleteRegistryArtifact({
+      pluginFilePath,
+      runtimeContract,
+      kind: "command",
+      name: "review-markdown",
+    })
+
+    expect(deletion.deleted).toBe("command:review-markdown")
+    expect(deletion.registry.currentRevision).toBe(first.revisionID)
+    expect(deletion.registry.pendingRevision).toBe(deletion.revisionID)
+    await expect(access(join(workspaceRoot, ".opencode/commands/review-markdown.md"))).rejects.toBeDefined()
+  })
+
+  test("prunes unreachable revision snapshots after rejection", async () => {
+    const first = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "review-markdown",
+        document: `---
+description: First review flow
+---
+
+Review README.md.
+`,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    const second = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "review-markdown",
+        document: `---
+description: Second review flow
+---
+
+Review README.md twice.
+`,
+      },
+    })
+    await rejectPendingRevision(pluginFilePath, runtimeContract)
+
+    const prune = await pruneRegistryRevisions({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(prune.removedRevisionIDs).toContain(second.revisionID)
+    expect(prune.keptRevisionIDs).toContain(first.revisionID)
+    await expect(
+      access(join(workspaceRoot, `.opencode/oc-evolver/revisions/${second.revisionID}.json`)),
+    ).rejects.toBeDefined()
   })
 })

@@ -1,5 +1,6 @@
 import runtimeContract from "../eval/runtime-contract.json"
 import {
+  DEFAULT_AUTONOMOUS_LOOP_EVALUATION_SCENARIOS,
   resolveAutonomousLoopSchedulePolicy,
   runAutonomousIteration,
   startAutonomousLoopWorker,
@@ -58,10 +59,12 @@ const verificationCommands = readListFlag("--verify").map((entry) => entry.split
 const workerConfig: AutonomousLoopWorkerConfig = {
   repoRoot,
   pluginFilePath: resolveGlobalPluginFilePath(),
-  prompt,
   intervalMs: schedulePolicy.intervalMs,
   verificationCommands: verificationCommands.length > 0 ? verificationCommands : undefined,
-  evaluationScenarios: requestedEvaluationScenarios.length > 0 ? requestedEvaluationScenarios : ["smoke"],
+  evaluationScenarios:
+    requestedEvaluationScenarios.length > 0
+      ? requestedEvaluationScenarios
+      : DEFAULT_AUTONOMOUS_LOOP_EVALUATION_SCENARIOS,
 }
 
 if (schedulePolicy.runInWorker) {
@@ -79,7 +82,7 @@ if (schedulePolicy.runInWorker) {
     repoRoot: workerConfig.repoRoot,
     pluginFilePath: workerConfig.pluginFilePath,
     runtimeContract,
-    prompt: workerConfig.prompt,
+    prompt,
     verificationCommands: workerConfig.verificationCommands,
     evaluationScenarios: workerConfig.evaluationScenarios,
     runEvaluationScenario: ({ repoRoot, scenarioName }) =>

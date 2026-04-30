@@ -29,6 +29,11 @@ type SessionPromptClient = {
   }
 }
 
+type SessionPromptResponse = {
+  info?: Record<string, unknown>
+  parts?: unknown[]
+}
+
 type SessionMemoryState = {
   storageMode?: SessionStorageMode
 }
@@ -230,13 +235,12 @@ export async function runAgentInSession(input: {
     },
   })
 
-  await promptSession({
+  const response = await promptSession({
     client: input.client,
     sessionID: input.sessionID,
     pluginFilePath: input.pluginFilePath,
     runtimeContract: input.runtimeContract,
     body: {
-      noReply: true,
       system: [
         `Run agent: ${input.agentName}`,
         ...(agentProfile.document.frontmatter.model
@@ -260,6 +264,14 @@ export async function runAgentInSession(input: {
       detail: `composed agent ${input.agentName} into session ${input.sessionID}`,
     },
   })
+
+  return {
+    executionType: "agent" as const,
+    agentName: input.agentName,
+    sessionID: input.sessionID,
+    prompt: input.prompt,
+    response,
+  }
 }
 
 export async function runCommandInSession(input: {
@@ -327,13 +339,12 @@ export async function runCommandInSession(input: {
 
   systemSections.push("Command instructions:", commandProfile.document.body)
 
-  await promptSession({
+  const response = await promptSession({
     client: input.client,
     sessionID: input.sessionID,
     pluginFilePath: input.pluginFilePath,
     runtimeContract: input.runtimeContract,
     body: {
-      noReply: true,
       system: systemSections.join("\n\n"),
       parts: [{ type: "text", text: input.prompt }],
     },
@@ -349,6 +360,14 @@ export async function runCommandInSession(input: {
       detail: `composed command ${input.commandName} into session ${input.sessionID}`,
     },
   })
+
+  return {
+    executionType: "command" as const,
+    commandName: input.commandName,
+    sessionID: input.sessionID,
+    prompt: input.prompt,
+    response,
+  }
 }
 
 async function promptSession(input: {
@@ -357,11 +376,11 @@ async function promptSession(input: {
   runtimeContract: OCEvolverRuntimeContract
   sessionID: string
   body: {
-    noReply: true
+    noReply?: boolean
     system?: string
     parts: Array<{ type: "text"; text: string }>
   }
-}) {
+}): Promise<SessionPromptResponse> {
   await ensureOperatorGuideForSession({
     client: input.client,
     pluginFilePath: input.pluginFilePath,
@@ -369,10 +388,28 @@ async function promptSession(input: {
     sessionID: input.sessionID,
   })
 
-  await input.client.session.prompt({
+  const response = await input.client.session.prompt({
     path: { id: input.sessionID },
     body: input.body,
   })
+
+  return normalizeSessionPromptResponse(response)
+}
+
+function normalizeSessionPromptResponse(response: unknown): SessionPromptResponse {
+  if (!response || typeof response !== "object") {
+    return {
+      info: {},
+      parts: [],
+    }
+  }
+
+  const record = response as { info?: unknown; parts?: unknown }
+
+  return {
+    info: record.info && typeof record.info === "object" ? (record.info as Record<string, unknown>) : {},
+    parts: Array.isArray(record.parts) ? record.parts : [],
+  }
 }
 
 export async function getSessionStorageMode(input: {

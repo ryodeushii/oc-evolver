@@ -70,17 +70,29 @@ The plugin exposes this stable v1 tool surface:
 - `evolver_write_memory`
 - `evolver_apply_skill`
 - `evolver_apply_memory`
+- `evolver_autonomous_status`
+- `evolver_autonomous_configure`
+- `evolver_autonomous_start`
+- `evolver_autonomous_pause`
+- `evolver_autonomous_resume`
+- `evolver_autonomous_run`
 - `evolver_run_agent`
 - `evolver_run_command`
+- `evolver_delete_artifact`
+- `evolver_prune`
 - `evolver_promote`
 - `evolver_reject`
 - `evolver_rollback`
 
 Mutable writes now land as pending revisions. In the interactive/operator flow, use `evolver_check` to see whether the registry is clean and whether a pending revision is still awaiting review, then use `evolver_promote` or `evolver_reject` to explicitly accept or discard that pending state.
 
-For a closed-loop path, `bun run autonomous:run` drives `opencode run` against the real repo, reuses the last continued session, persists loop learning under `.opencode/oc-evolver/autonomous-loop.json`, runs the default verification gates (`bun run typecheck`, `bun run test:unit`), runs the `smoke` eval by default, and then auto-promotes or auto-rejects the pending revision. Pass `--worker` to keep that loop on a Worker-backed 15-minute schedule by default, or override the cadence with `--interval-ms <ms>`.
+The autonomous loop now has plugin-native control-plane tools. `evolver_autonomous_configure` persists queued objectives, verification commands, eval scenarios, and schedule state under `.opencode/oc-evolver/autonomous-loop.json`. `evolver_autonomous_start`, `evolver_autonomous_pause`, and `evolver_autonomous_resume` control scheduled workers through that persisted state, while `evolver_autonomous_run` executes one iteration immediately and `evolver_autonomous_status` reports the queue, latest learning, and recent iteration artifacts.
 
-Commands are executable runtime artifacts rather than write-only markdown. `evolver_run_command` composes command instructions with any referenced agent instructions, inherited memory profiles, runtime permission metadata, and preferred model guidance.
+For a closed-loop path, `bun run autonomous:run` drives `opencode run` against the real repo, reuses the last continued session, persists richer loop learning plus iteration history under `.opencode/oc-evolver/autonomous-loop.json`, runs the default verification gates (`bun run typecheck`, `bun run test:unit`), runs the dedicated `autonomous-run` eval by default, and then auto-promotes, auto-rejects, or rolls back a newly accepted revision if post-promotion health regresses. Scheduled runs now use both a worker-local in-flight guard and a durable lock at `.opencode/oc-evolver/autonomous-loop.lock`. Pass `--worker` to keep that loop on a Worker-backed 15-minute schedule by default, or override the cadence with `--interval-ms <ms>`.
+
+Commands are executable runtime artifacts rather than write-only markdown. `evolver_run_agent` and `evolver_run_command` now return structured execution records with the composed session response instead of only acknowledging that they ran. `evolver_run_command` composes command instructions with any referenced agent instructions, inherited memory profiles, runtime permission metadata, and preferred model guidance.
+
+Lifecycle cleanup is also plugin-native: `evolver_delete_artifact` stages a deletion into a pending revision and removes the artifact from the working registry state, while `evolver_prune` removes obsolete revision snapshots that are no longer reachable from the accepted or pending revision graph.
 
 Memory profiles are versioned markdown artifacts stored under `.opencode/memory/`. They steer session behavior by injecting Basic Memory routing guidance, optional `storage_mode`, and reusable source/query hints into skill and agent composition without copying the underlying Basic Memory note corpus into the kernel registry.
 
@@ -92,6 +104,7 @@ If a session applies a memory profile with `storage_mode: artifact-only`, the pl
 - Typecheck: `bun run typecheck`
 - Unit tests: `bun run test:unit`
 - Autonomous loop: `bun run autonomous:run`
+- Autonomous eval: `bun run eval:autonomous-run`
 - Smoke eval: `bun run eval:smoke`
 - Full eval suite: `bun run eval:all`
 

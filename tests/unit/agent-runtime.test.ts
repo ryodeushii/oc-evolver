@@ -274,7 +274,7 @@ Review markdown changes before they land.
       },
     )
 
-    await hooks.tool?.evolver_run_agent?.execute(
+    const result = await hooks.tool?.evolver_run_agent?.execute(
       {
         agentName: "fixture-reviewer",
         prompt: "Review README.md and summarize the risk.",
@@ -298,12 +298,25 @@ Review markdown changes before they land.
     expect(promptCalls[1]).toMatchObject({
       path: { id: "session-2" },
       body: {
-        noReply: true,
+        parts: [{ type: "text", text: "Review README.md and summarize the risk." }],
       },
     })
+    expect(JSON.stringify(promptCalls[1])).not.toContain("\"noReply\":true")
     expect(JSON.stringify(promptCalls[1])).toContain("fixture-reviewer")
     expect(JSON.stringify(promptCalls[1])).toContain("Review markdown changes before they land")
     expect(JSON.stringify(promptCalls[1])).toContain("Review README.md and summarize the risk")
+    const agentResult = typeof result === "string" ? result : result?.output
+
+    expect(JSON.parse(agentResult ?? "null")).toMatchObject({
+      executionType: "agent",
+      agentName: "fixture-reviewer",
+      sessionID: "session-2",
+      prompt: "Review README.md and summarize the risk.",
+      response: {
+        info: {},
+        parts: [],
+      },
+    })
 
     const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
     expect(auditLog).toContain("run_agent")
@@ -522,7 +535,7 @@ Focus on correctness and risk.
       },
     )
 
-    await hooks.tool?.evolver_run_command?.execute(
+    const result = await hooks.tool?.evolver_run_command?.execute(
       {
         commandName: "review-markdown",
         prompt: "Review README.md and summarize the risk.",
@@ -546,9 +559,10 @@ Focus on correctness and risk.
     expect(promptCalls[1]).toMatchObject({
       path: { id: "session-5" },
       body: {
-        noReply: true,
+        parts: [{ type: "text", text: "Review README.md and summarize the risk." }],
       },
     })
+    expect(JSON.stringify(promptCalls[1])).not.toContain("\"noReply\":true")
     expect(JSON.stringify(promptCalls[1])).toContain("Run command: review-markdown")
     expect(JSON.stringify(promptCalls[1])).toContain("fixture-reviewer")
     expect(JSON.stringify(promptCalls[1])).toContain("Review markdown changes before they land")
@@ -556,6 +570,18 @@ Focus on correctness and risk.
     expect(JSON.stringify(promptCalls[1])).toContain("project-preferences")
     expect(JSON.stringify(promptCalls[1])).toContain("Preferred model: openai/gpt-5.4")
     expect(JSON.stringify(promptCalls[1])).toContain("Review README.md and summarize the risk")
+    const commandResult = typeof result === "string" ? result : result?.output
+
+    expect(JSON.parse(commandResult ?? "null")).toMatchObject({
+      executionType: "command",
+      commandName: "review-markdown",
+      sessionID: "session-5",
+      prompt: "Review README.md and summarize the risk.",
+      response: {
+        info: {},
+        parts: [],
+      },
+    })
 
     const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
     expect(auditLog).toContain("run_command")

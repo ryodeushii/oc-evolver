@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import {
+  DEFAULT_SCENARIOS,
   runEvaluationScenario,
   type EvalCommandResult,
 } from "../../scripts/run-eval.ts"
@@ -310,5 +311,89 @@ describe("evaluation scenarios", () => {
       failureClass: "invalid_artifact",
     })
     expect(auditLog).toContain("invalid_artifact")
+  })
+
+  test("autonomous-run scenario is part of the default sweep and captures loop state artifacts", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-run.md"),
+      "Run one autonomous improvement loop and leave the registry promoted with persisted learning.\n",
+    )
+
+    const result = await runEvaluationScenario({
+      repoRoot,
+      scenarioName: "autonomous-run",
+      timestamp: "2026-04-30T14-15-00.000Z",
+      executeCommand: async ({ workspaceRoot }) => {
+        await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
+        await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+        await writeFile(
+          join(workspaceRoot, ".opencode/commands/autonomous-review.md"),
+          "---\ndescription: Autonomous review flow\n---\n\nReview README.md once.\n",
+        )
+        await writeFile(
+          join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+          JSON.stringify(
+            {
+              lastSessionID: "ses-auto-1",
+              latestLearning: {
+                summary: "The last autonomous iteration was promoted at revision rev-auto-1.",
+                remainingObjectives: [],
+              },
+              objectives: [],
+              iterations: [
+                {
+                  decision: "promoted",
+                  changedArtifacts: ["command:autonomous-review"],
+                },
+              ],
+            },
+            null,
+            2,
+          ),
+        )
+        await writeFile(
+          join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+          JSON.stringify(
+            {
+              skills: {},
+              agents: {},
+              commands: {
+                "autonomous-review": {
+                  kind: "command",
+                  name: "autonomous-review",
+                  nativePath: ".opencode/commands/autonomous-review.md",
+                  revisionID: "rev-auto-1",
+                  contentHash: "a".repeat(64),
+                },
+              },
+              memories: {},
+              quarantine: {},
+              currentRevision: "rev-auto-1",
+              pendingRevision: null,
+            },
+            null,
+            2,
+          ),
+        )
+        await writeFile(
+          join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+          '{"action":"promote","status":"success","revisionID":"rev-auto-1"}\n',
+        )
+
+        return {
+          stdout: '{"type":"text","text":"autonomous run ok","sessionID":"ses-auto-1"}',
+          stderr: "",
+          exitCode: 0,
+        } satisfies EvalCommandResult
+      },
+    })
+
+    const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
+      changedFiles: string[]
+    }
+
+    expect(DEFAULT_SCENARIOS).toContain("autonomous-run")
+    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/autonomous-loop.json")
+    expect(resultJson.changedFiles).toContain(".opencode/commands/autonomous-review.md")
   })
 })
