@@ -16,5 +16,5 @@
     "resolveJsonModule": true,
     "types": ["bun", "node"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "eval/runtime-contract.json"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts", "eval/runtime-contract.json"]
 }
