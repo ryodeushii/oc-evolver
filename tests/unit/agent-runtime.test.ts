@@ -1,0 +1,209 @@
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+
+import runtimeContract from "../../eval/runtime-contract.json"
+import { OCEvolverPlugin } from "../../src/oc-evolver.ts"
+
+describe("agent runtime", () => {
+  let workspaceRoot: string
+  let promptCalls: Array<unknown>
+
+  beforeEach(async () => {
+    workspaceRoot = await mkdtemp(join(tmpdir(), "oc-evolver-agent-runtime-"))
+    promptCalls = []
+
+    await mkdir(join(workspaceRoot, ".opencode/plugins"), { recursive: true })
+    await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+    await writeFile(
+      join(workspaceRoot, ".opencode/plugins/oc-evolver.ts"),
+      "export const plugin = true\n",
+    )
+    await writeFile(
+      join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+      JSON.stringify({
+        skills: {},
+        agents: {},
+        commands: {},
+        currentRevision: null,
+      }, null, 2),
+    )
+  })
+
+  afterEach(async () => {
+    await rm(workspaceRoot, { recursive: true, force: true })
+    mock.restore()
+  })
+
+  test("evolver_apply_skill injects the current skill bundle into the session with noReply", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async (payload: unknown) => {
+            promptCalls.push(payload)
+            return { info: {}, parts: [] }
+          },
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_skill?.execute(
+      {
+        skillName: "fixture-refactor",
+        skillDocument: `---
+name: fixture-refactor
+description: Rewrite TODO markers in markdown files
+---
+
+Use the helper script.
+`,
+        helperFiles: [
+          {
+            relativePath: "scripts/rewrite.py",
+            content: "print('rewrite')\n",
+          },
+        ],
+      },
+      {
+        sessionID: "session-1",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_apply_skill?.execute(
+      {
+        skillName: "fixture-refactor",
+      },
+      {
+        sessionID: "session-1",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(promptCalls).toHaveLength(1)
+    expect(promptCalls[0]).toMatchObject({
+      path: { id: "session-1" },
+      body: {
+        noReply: true,
+      },
+    })
+    expect(JSON.stringify(promptCalls[0])).toContain("fixture-refactor")
+    expect(JSON.stringify(promptCalls[0])).toContain("scripts/rewrite.py")
+    expect(JSON.stringify(promptCalls[0])).toContain("print('rewrite')")
+
+    const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
+    expect(auditLog).toContain("apply_skill")
+  })
+
+  test("evolver_run_agent composes the current agent prompt into a session reply", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async (payload: unknown) => {
+            promptCalls.push(payload)
+            return { info: {}, parts: [] }
+          },
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_agent?.execute(
+      {
+        agentName: "fixture-reviewer",
+        document: `---
+description: Review markdown changes
+mode: subagent
+permission:
+  edit: deny
+---
+
+Review markdown changes before they land.
+`,
+      },
+      {
+        sessionID: "session-2",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_run_agent?.execute(
+      {
+        agentName: "fixture-reviewer",
+        prompt: "Review README.md and summarize the risk.",
+      },
+      {
+        sessionID: "session-2",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(promptCalls).toHaveLength(1)
+    expect(promptCalls[0]).toMatchObject({
+      path: { id: "session-2" },
+      body: {
+        noReply: false,
+      },
+    })
+    expect(JSON.stringify(promptCalls[0])).toContain("fixture-reviewer")
+    expect(JSON.stringify(promptCalls[0])).toContain("Review markdown changes before they land")
+    expect(JSON.stringify(promptCalls[0])).toContain("Review README.md and summarize the risk")
+
+    const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
+    expect(auditLog).toContain("run_agent")
+  })
+})

@@ -12,6 +12,8 @@ export type AuditEvent = {
     | "write_skill"
     | "write_agent"
     | "write_command"
+    | "apply_skill"
+    | "run_agent"
     | "rollback"
     | "policy_denied"
   status: "success" | "failure"
