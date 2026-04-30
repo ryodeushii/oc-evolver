@@ -55,6 +55,18 @@ describe("plugin tool surface", () => {
     ])
   })
 
+  test("package root exposes the plugin server entrypoint", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../../package.json", import.meta.url), "utf8"),
+    )
+
+    expect(packageJson.exports?.["."]).toBe("./index.ts")
+
+    const entrypoint = await import("../../index.ts")
+
+    expect(entrypoint.server).toBe(OCEvolverPlugin)
+  })
+
   test("bootstraps plugin-owned runtime directories during config", async () => {
     await rm(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true, force: true })
 
@@ -77,7 +89,7 @@ describe("plugin tool surface", () => {
       $: {} as never,
     } as never)
 
-    await hooks.config?.()
+    await hooks.config?.({} as never)
 
     await access(join(workspaceRoot, ".opencode/oc-evolver"))
     await access(join(workspaceRoot, ".opencode/skills"))
