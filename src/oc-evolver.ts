@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 
 import { tool, type Plugin } from "@opencode-ai/plugin"
@@ -10,9 +9,9 @@ import {
   rollbackRevision,
   runAgentInSession,
 } from "./kernel/agent-runtime.ts"
-import { resolveKernelPaths } from "./kernel/paths.ts"
 import { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 import {
+  ensureKernelRuntimePaths,
   loadRegistry,
   applyMutationTransaction,
   validateRegistryArtifacts,
@@ -72,6 +71,8 @@ function extractPatchTargetPaths(patchText: string) {
 
 export const OCEvolverPlugin: Plugin = async (ctx) => {
   const pluginFilePath = resolvePluginFilePath(ctx)
+
+  await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
 
   return {
     tool: {
@@ -244,11 +245,7 @@ export const OCEvolverPlugin: Plugin = async (ctx) => {
       }),
     },
     config: async () => {
-      const kernelPaths = resolveKernelPaths(pluginFilePath, runtimeContract)
-
-      if (!existsSync(kernelPaths.registryRoot)) {
-        return
-      }
+      await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
     },
     "permission.ask": async (permission, output) => {
       if (!isMutatingPermission(permission)) {

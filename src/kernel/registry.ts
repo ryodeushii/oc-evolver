@@ -120,6 +120,32 @@ export async function loadRegistry(
   }
 }
 
+export async function ensureKernelRuntimePaths(
+  pluginFilePath: string,
+  runtimeContract: OCEvolverRuntimeContract,
+) {
+  const kernelPaths = resolveKernelPaths(pluginFilePath, runtimeContract)
+
+  await Promise.all([
+    mkdir(kernelPaths.registryRoot, { recursive: true }),
+    mkdir(kernelPaths.skillsRoot, { recursive: true }),
+    mkdir(kernelPaths.agentsRoot, { recursive: true }),
+    mkdir(kernelPaths.commandsRoot, { recursive: true }),
+  ])
+
+  const registryPath = resolveRegistryPath(pluginFilePath, runtimeContract)
+
+  try {
+    await stat(registryPath)
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+      throw error
+    }
+
+    await saveRegistry(pluginFilePath, runtimeContract, emptyRegistry())
+  }
+}
+
 export async function validateRegistryArtifacts(
   pluginFilePath: string,
   runtimeContract: OCEvolverRuntimeContract,

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -53,6 +53,48 @@ describe("plugin tool surface", () => {
       "evolver_write_command",
       "evolver_write_skill",
     ])
+  })
+
+  test("bootstraps plugin-owned runtime directories during config", async () => {
+    await rm(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true, force: true })
+
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.config?.()
+
+    await access(join(workspaceRoot, ".opencode/oc-evolver"))
+    await access(join(workspaceRoot, ".opencode/skills"))
+    await access(join(workspaceRoot, ".opencode/agent"))
+    await access(join(workspaceRoot, ".opencode/commands"))
+
+    expect(
+      JSON.parse(
+        await readFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
+      ),
+    ).toEqual({
+      skills: {},
+      agents: {},
+      commands: {},
+      quarantine: {},
+      currentRevision: null,
+    })
   })
 
   test("denies protected plugin edits through permission.ask and records an audit event", async () => {
