@@ -311,6 +311,67 @@ describe("plugin tool surface", () => {
     })
   })
 
+  test("uses the global runtime roots in an oc-evolver development workspace", async () => {
+    const globalConfigHome = join(workspaceRoot, "xdg-config")
+    const globalOpencodeRoot = join(globalConfigHome, "opencode")
+    const originalXdgConfigHome = process.env.XDG_CONFIG_HOME
+    const originalHome = process.env.HOME
+
+    await mkdir(join(workspaceRoot, "src"), { recursive: true })
+    await mkdir(globalOpencodeRoot, { recursive: true })
+    await writeFile(
+      join(workspaceRoot, "package.json"),
+      JSON.stringify({ name: "oc-evolver" }, null, 2),
+    )
+    await writeFile(join(workspaceRoot, "src/oc-evolver.ts"), "export const dev = true\n")
+    await rm(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true, force: true })
+    await rm(join(workspaceRoot, ".opencode/skills"), { recursive: true, force: true })
+    await rm(join(workspaceRoot, ".opencode/agent"), { recursive: true, force: true })
+    await rm(join(workspaceRoot, ".opencode/commands"), { recursive: true, force: true })
+    await rm(join(workspaceRoot, ".opencode/memory"), { recursive: true, force: true })
+
+    process.env.XDG_CONFIG_HOME = globalConfigHome
+    process.env.HOME = workspaceRoot
+
+    try {
+      const hooks = await OCEvolverPlugin({
+        client: {
+          session: {
+            prompt: async () => ({ info: {}, parts: [] }),
+          },
+        },
+        project: {
+          id: "fixture-project",
+          worktree: workspaceRoot,
+        },
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        experimental_workspace: {
+          register() {},
+        },
+        serverUrl: new URL("http://localhost:4096"),
+        $: {} as never,
+      } as never)
+
+      await hooks.config?.({} as never)
+
+      await access(join(globalOpencodeRoot, "oc-evolver"))
+      await access(join(globalOpencodeRoot, "skills"))
+      await access(join(globalOpencodeRoot, "agent"))
+      await access(join(globalOpencodeRoot, "commands"))
+      await access(join(globalOpencodeRoot, "memory"))
+
+      await expect(access(join(workspaceRoot, ".opencode/oc-evolver"))).rejects.toBeDefined()
+      await expect(access(join(workspaceRoot, ".opencode/skills"))).rejects.toBeDefined()
+      await expect(access(join(workspaceRoot, ".opencode/agent"))).rejects.toBeDefined()
+      await expect(access(join(workspaceRoot, ".opencode/commands"))).rejects.toBeDefined()
+      await expect(access(join(workspaceRoot, ".opencode/memory"))).rejects.toBeDefined()
+    } finally {
+      process.env.XDG_CONFIG_HOME = originalXdgConfigHome
+      process.env.HOME = originalHome
+    }
+  })
+
   test("denies protected plugin edits through permission.ask and records an audit event", async () => {
     const hooks = await OCEvolverPlugin({
       client: {

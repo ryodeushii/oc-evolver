@@ -48,8 +48,15 @@ const BASIC_MEMORY_MUTATION_TOOLS = new Set([
 const CONFIG_FILE_NAMES = ["opencode.jsonc", "opencode.json"]
 const CONFIG_PLUGIN_HINTS = ["oc-evolver", "oc-resolver", "github.com/ryodeushii/oc-evolver"]
 
-function resolvePluginFilePath(ctx: { directory: string; worktree: string }) {
+function resolvePluginFilePath(
+  ctx: { directory: string; worktree: string },
+  isDevelopmentWorkspace: boolean,
+) {
   const localPluginFilePath = join(ctx.directory, runtimeContract.pluginDir, "oc-evolver.ts")
+
+  if (isDevelopmentWorkspace) {
+    return resolveGlobalPluginFilePath()
+  }
 
   if (existsSync(localPluginFilePath) || isPluginRegisteredInOpencodeRoot(join(ctx.directory, ".opencode"))) {
     return localPluginFilePath
@@ -60,7 +67,7 @@ function resolvePluginFilePath(ctx: { directory: string; worktree: string }) {
   // Package-installed global plugins do not have a project-local bridge file,
   // so fall back to the global config root that registered the plugin.
   if (globalOpencodeRoot && isPluginRegisteredInOpencodeRoot(globalOpencodeRoot)) {
-    return join(globalOpencodeRoot, "plugins", "oc-evolver.ts")
+    return resolveGlobalPluginFilePath()
   }
 
   return localPluginFilePath
@@ -74,6 +81,10 @@ function resolveGlobalOpencodeRoot() {
   const configHome = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config")
 
   return join(configHome, "opencode")
+}
+
+function resolveGlobalPluginFilePath() {
+  return join(resolveGlobalOpencodeRoot(), "plugins", "oc-evolver.ts")
 }
 
 function isPluginRegisteredInOpencodeRoot(opencodeRoot: string) {
@@ -149,10 +160,10 @@ function extractPatchTargetPaths(patchText: string) {
 
 export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
   return async (ctx) => {
+    const isDevelopmentWorkspace = isKernelDevelopmentWorkspace(ctx.project.worktree)
     const pluginFilePath = pluginEntryPointPath
       ? resolveExplicitPluginFilePath(pluginEntryPointPath)
-      : resolvePluginFilePath(ctx)
-    const isDevelopmentWorkspace = isKernelDevelopmentWorkspace(ctx.project.worktree)
+      : resolvePluginFilePath(ctx, isDevelopmentWorkspace)
 
     await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
 
@@ -459,5 +470,5 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
 export const OCEvolverPlugin: Plugin = createOCEvolverPlugin()
 
 export function createServerPlugin(_pluginModuleURL?: string): Plugin {
-  return createOCEvolverPlugin(join(resolveGlobalOpencodeRoot(), "plugins", "oc-evolver.ts"))
+  return createOCEvolverPlugin(resolveGlobalPluginFilePath())
 }

@@ -17,7 +17,9 @@ OpenCode detects the package's `./server` export and installs it as a server plu
 
 Installed `./server` usage is intentionally global-only: mutable runtime state lives under `~/.config/opencode/oc-evolver/`, `~/.config/opencode/skills/`, `~/.config/opencode/agent/`, `~/.config/opencode/commands/`, and `~/.config/opencode/memory/`.
 
-Repo-local development and eval fixtures still use workspace-local `.opencode/*` roots through `OCEvolverPlugin` and explicit bridge files.
+Eval fixtures still use workspace-local `.opencode/*` roots through explicit bridge files.
+
+When the current workspace is the `oc-evolver` source repo itself, the plugin still uses the global OpenCode config root for mutable runtime state. Local development only relaxes protected-path checks so the kernel source can be edited in place.
 
 ## Layout
 
@@ -31,7 +33,7 @@ Repo-local development and eval fixtures still use workspace-local `.opencode/*`
 
 ## Mutable roots
 
-The kernel only allows autonomous writes inside these roots:
+The kernel only allows autonomous writes inside these roots relative to the active OpenCode config root:
 
 - `.opencode/oc-evolver/`
 - `.opencode/skills/`
