@@ -2,6 +2,19 @@
 
 `oc-evolver` is an OpenCode plugin that exposes a stable kernel for evolving mutable OpenCode behavior without allowing the model to rewrite the kernel itself.
 
+## Install
+
+To load the plugin directly from a GitHub URL, put the git dependency spec directly in your OpenCode config:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["git+https://github.com/<owner>/oc-evolver.git"]
+}
+```
+
+OpenCode detects the package's `./server` export and installs it as a server plugin target.
+
 ## Layout
 
 - Kernel plugin entry: `src/oc-evolver.ts`

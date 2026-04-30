@@ -61,6 +61,7 @@ describe("plugin tool surface", () => {
     )
 
     expect(packageJson.exports?.["."]).toBe("./index.ts")
+    expect(packageJson.exports?.["./server"]).toBe("./index.ts")
 
     const entrypoint = await import("../../index.ts")
 
