@@ -64,7 +64,54 @@ describe("plugin tool surface", () => {
 
     const entrypoint = await import("../../index.ts")
 
-    expect(entrypoint.server).toBe(OCEvolverPlugin)
+    expect(typeof entrypoint.server).toBe("function")
+    expect(entrypoint.OCEvolverPlugin).toBe(OCEvolverPlugin)
+  })
+
+  test("uses the bridge plugin path for global runtime roots", async () => {
+    const projectRoot = join(workspaceRoot, "project")
+    const globalOpencodeRoot = join(workspaceRoot, "global-opencode")
+    const globalPluginFilePath = join(globalOpencodeRoot, "plugins/oc-evolver.ts")
+
+    await mkdir(projectRoot, { recursive: true })
+    await mkdir(join(globalOpencodeRoot, "plugins"), { recursive: true })
+    await writeFile(globalPluginFilePath, "export const plugin = true\n")
+
+    const pluginModule = await import("../../src/oc-evolver.ts")
+
+    expect(typeof pluginModule.createOCEvolverPlugin).toBe("function")
+
+    if (typeof pluginModule.createOCEvolverPlugin !== "function") {
+      throw new Error("createOCEvolverPlugin export missing")
+    }
+
+    const hooks = await pluginModule.createOCEvolverPlugin(globalPluginFilePath)({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: projectRoot,
+      },
+      directory: projectRoot,
+      worktree: projectRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.config?.({} as never)
+
+    await access(join(globalOpencodeRoot, "oc-evolver"))
+    await access(join(globalOpencodeRoot, "skills"))
+    await access(join(globalOpencodeRoot, "agent"))
+    await access(join(globalOpencodeRoot, "commands"))
+
+    await expect(access(join(projectRoot, ".opencode/oc-evolver"))).rejects.toBeDefined()
   })
 
   test("bootstraps plugin-owned runtime directories during config", async () => {
