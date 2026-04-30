@@ -1,6 +1,5 @@
 import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { fileURLToPath } from "node:url"
 import { join, resolve } from "node:path"
 
 import { tool, type Plugin } from "@opencode-ai/plugin"
@@ -459,6 +458,6 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
 
 export const OCEvolverPlugin: Plugin = createOCEvolverPlugin()
 
-export function createServerPlugin(pluginModuleURL: string): Plugin {
-  return createOCEvolverPlugin(fileURLToPath(pluginModuleURL))
+export function createServerPlugin(_pluginModuleURL?: string): Plugin {
+  return createOCEvolverPlugin(join(resolveGlobalOpencodeRoot(), "plugins", "oc-evolver.ts"))
 }

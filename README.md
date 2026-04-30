@@ -15,6 +15,10 @@ To load the plugin directly from a GitHub URL, put the git dependency spec direc
 
 OpenCode detects the package's `./server` export and installs it as a server plugin target.
 
+Installed `./server` usage is intentionally global-only: mutable runtime state lives under `~/.config/opencode/oc-evolver/`, `~/.config/opencode/skills/`, `~/.config/opencode/agent/`, `~/.config/opencode/commands/`, and `~/.config/opencode/memory/`.
+
+Repo-local development and eval fixtures still use workspace-local `.opencode/*` roots through `OCEvolverPlugin` and explicit bridge files.
+
 ## Layout
 
 - Kernel plugin entry: `src/oc-evolver.ts`
