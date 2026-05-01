@@ -1,5 +1,6 @@
 {
   "name": "oc-evolver",
+  "$schema": "https://json.schemastore.org/package.json",
   "version": "0.3.1",
   "private": true,
   "type": "module",
@@ -22,14 +23,17 @@
     "eval:smoke": "bun run scripts/run-eval.ts smoke",
     "eval:all": "bun run scripts/run-eval.ts all"
   },
+  "overrides": {
+    "uuid": "14.0.0"
+  },
   "dependencies": {
-    "@opencode-ai/plugin": "latest",
-    "@opencode-ai/sdk": "latest",
+    "@opencode-ai/plugin": "^1.14.31",
+    "@opencode-ai/sdk": "^1.14.31",
     "zod": "4.4.1"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "@types/node": "latest",
-    "typescript": "latest"
+    "@types/bun": "^1.3.13",
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.3"
   }
 }
