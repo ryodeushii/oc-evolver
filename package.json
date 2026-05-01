@@ -25,7 +25,7 @@
   "dependencies": {
     "@opencode-ai/plugin": "latest",
     "@opencode-ai/sdk": "latest",
-    "zod": "latest"
+    "zod": "4.4.1"
   },
   "devDependencies": {
     "@types/bun": "latest",
