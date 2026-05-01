@@ -229,6 +229,73 @@ Review README.md twice.
     expect(resume.activation.mode).toBe("worker")
   })
 
+  test("evolver_autonomous_configure accepts objective-level verification commands", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    expect(
+      (
+        hooks.tool.evolver_autonomous_configure.args.objectives.unwrap() as {
+          _def: {
+            element?: {
+              shape?: {
+                completionCriteria?: {
+                  shape?: Record<string, unknown>
+                }
+              }
+            }
+          }
+        }
+      )._def.element?.shape?.completionCriteria?.shape,
+    ).toHaveProperty("verificationCommands")
+
+    const result = JSON.parse(
+      await hooks.tool.evolver_autonomous_configure.execute({
+        replaceObjectives: true,
+        objectives: [
+          {
+            prompt: "Keep the registry lifecycle healthy.",
+            completionCriteria: {
+              verificationCommands: [["bun", "run", "typecheck"], ["bun", "run", "test:unit"]],
+            },
+          },
+        ],
+      }),
+    ) as {
+      objectives: Array<{
+        prompt: string
+        completionCriteria: {
+          verificationCommands?: string[][]
+        } | null
+      }>
+    }
+
+    expect(result.objectives).toMatchObject([
+      {
+        prompt: "Keep the registry lifecycle healthy.",
+        completionCriteria: {
+          verificationCommands: [["bun", "run", "typecheck"], ["bun", "run", "test:unit"]],
+        },
+      },
+    ])
+  })
+
   test("autonomous evaluation runner falls back to the bundled eval harness when the worktree lacks one", async () => {
     const repoRoot = fileURLToPath(new URL("../../", import.meta.url)).replace(/\/$/, "")
     let evaluationInvocation: Record<string, unknown> | null = null

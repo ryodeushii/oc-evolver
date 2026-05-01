@@ -515,6 +515,7 @@ export function createOCEvolverPlugin(
                 completionCriteria: tool.schema.object({
                   changedArtifacts: tool.schema.array(tool.schema.string()).optional(),
                   evaluationScenarios: tool.schema.array(tool.schema.string()).optional(),
+                  verificationCommands: tool.schema.array(tool.schema.array(tool.schema.string())).optional(),
                 }),
               }),
             ).optional(),
