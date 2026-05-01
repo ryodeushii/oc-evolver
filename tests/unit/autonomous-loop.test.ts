@@ -629,6 +629,167 @@ describe("autonomous loop", () => {
     })
   })
 
+  test("marks an objective completed when its required verification command passes", async () => {
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      evaluationScenarios: [],
+      objectives: [
+        {
+          prompt: "Complete once typecheck passes during the autonomous iteration.",
+          completionCriteria: {
+            verificationCommands: [["bun", "run", "typecheck"]],
+          },
+        },
+      ],
+    })
+
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: "---\ndescription: Autonomous review\n---\n\nReview autonomously.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-verification-proof"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "typecheck ok\n",
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(status.objectives[0]).toMatchObject({
+      prompt: "Complete once typecheck passes during the autonomous iteration.",
+      status: "completed",
+    })
+    expect(status.objectives[0]?.lastCompletionEvidence).toMatchObject({
+      satisfied: true,
+      passedVerificationCommands: [["bun", "run", "typecheck"]],
+      missingVerificationCommands: [],
+    })
+  })
+
+  test("records verification and evaluation diagnostics in iteration history", async () => {
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      evaluationScenarios: [],
+      objectives: [
+        {
+          prompt: "Capture verification and evaluation diagnostics.",
+          completionCriteria: {
+            changedArtifacts: ["command:autonomous-review"],
+          },
+        },
+      ],
+    })
+
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: ["objective-proof"],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: "---\ndescription: Autonomous review\n---\n\nReview autonomously.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-diagnostics"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "typecheck ok\n",
+          stderr: "warning: none\n",
+          exitCode: 0,
+        }
+      },
+      runEvaluationScenario: async ({ scenarioName }) => {
+        return {
+          scenarioName,
+          resultDir: join(repoRoot, "eval-results", scenarioName),
+          workspaceRoot: repoRoot,
+          stdout: "eval ok\n",
+          stderr: "eval stderr\n",
+          exitCode: 0,
+          changedFiles: ["README.md"],
+        }
+      },
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(status.iterations.at(-1)?.verification).toEqual([
+      {
+        command: ["bun", "run", "typecheck"],
+        exitCode: 0,
+        stdout: "typecheck ok\n",
+        stderr: "warning: none\n",
+      },
+    ])
+    expect(status.iterations.at(-1)?.evaluations).toEqual([
+      {
+        scenarioName: "objective-proof",
+        exitCode: 0,
+        stdout: "eval ok\n",
+        stderr: "eval stderr\n",
+        changedFiles: ["README.md"],
+      },
+    ])
+  })
+
   test("preserves actual artifact evidence when a later verification step rejects the iteration", async () => {
     await configureAutonomousLoop({
       pluginFilePath,
@@ -770,6 +931,9 @@ describe("autonomous loop", () => {
       {
         scenarioName: "objective-proof",
         exitCode: 1,
+        stdout: "",
+        stderr: "scenario boom",
+        changedFiles: [],
       },
     ])
   })

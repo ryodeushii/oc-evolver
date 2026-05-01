@@ -61,19 +61,24 @@ export type AutonomousLoopActivationResult = {
 type AutonomousLoopVerificationRecord = {
   command: string[]
   exitCode: number
+  stdout: string
+  stderr: string
 }
 
 type AutonomousLoopObjectiveCompletionCriteria = {
   changedArtifacts?: string[]
   evaluationScenarios?: string[]
+  verificationCommands?: string[][]
 }
 
 type AutonomousLoopObjectiveCompletionEvidence = {
   satisfied: boolean
   changedArtifacts: string[]
   passedEvaluationScenarios: string[]
+  passedVerificationCommands: string[][]
   missingChangedArtifacts: string[]
   missingEvaluationScenarios: string[]
+  missingVerificationCommands: string[][]
   checkedAt: string
 }
 
@@ -88,6 +93,9 @@ type AutonomousLoopFailurePolicy = {
 type AutonomousLoopEvaluationRecord = {
   scenarioName: string
   exitCode: number
+  stdout: string
+  stderr: string
+  changedFiles: string[]
 }
 
 type AutonomousLoopObjective = {
@@ -1157,6 +1165,8 @@ async function runVerificationCommands(input: {
     records.push({
       command,
       exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
     })
 
     if (result.exitCode !== 0) {
@@ -1201,6 +1211,9 @@ async function runEvaluationScenarios(input: {
       records.push({
         scenarioName,
         exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        changedFiles: [...result.changedFiles],
       })
 
       if (result.exitCode !== 0) {
@@ -1213,6 +1226,9 @@ async function runEvaluationScenarios(input: {
       records.push({
         scenarioName,
         exitCode: 1,
+        stdout: "",
+        stderr: error instanceof Error ? error.message : String(error),
+        changedFiles: [],
       })
 
       return {
@@ -1293,6 +1309,9 @@ function describePendingObjectiveReason(objective: AutonomousLoopObjective) {
     ),
     ...(objective.lastCompletionEvidence?.missingEvaluationScenarios ?? []).map(
       (scenarioName) => `evaluation scenario ${scenarioName}`,
+    ),
+    ...(objective.lastCompletionEvidence?.missingVerificationCommands ?? []).map(
+      (command) => `verification command ${formatCommandLabel(command)}`,
     ),
   ]
 
@@ -1399,12 +1418,19 @@ function normalizeAutonomousLoopState(
           ? iteration.verification.map((record) => ({
               command: Array.isArray(record.command) ? record.command.filter((entry) => typeof entry === "string") : [],
               exitCode: typeof record.exitCode === "number" ? record.exitCode : 1,
+              stdout: typeof record.stdout === "string" ? record.stdout : "",
+              stderr: typeof record.stderr === "string" ? record.stderr : "",
             }))
           : [],
         evaluations: Array.isArray(iteration.evaluations)
           ? iteration.evaluations.map((record) => ({
               scenarioName: record.scenarioName,
               exitCode: typeof record.exitCode === "number" ? record.exitCode : 1,
+              stdout: typeof record.stdout === "string" ? record.stdout : "",
+              stderr: typeof record.stderr === "string" ? record.stderr : "",
+              changedFiles: Array.isArray(record.changedFiles)
+                ? record.changedFiles.filter((entry): entry is string => typeof entry === "string")
+                : [],
             }))
           : [],
         changedArtifacts: Array.isArray(iteration.changedArtifacts)
@@ -1503,6 +1529,28 @@ function normalizeScenarioList(scenarios: string[] | undefined) {
   return scenarios === undefined
     ? [...DEFAULT_AUTONOMOUS_LOOP_EVALUATION_SCENARIOS]
     : dedupeStrings(scenarios)
+}
+
+function normalizeVerificationCommandCriteria(commands: string[][] | undefined) {
+  return dedupeCommandMatrix(normalizeCommandMatrix(commands, []))
+}
+
+function dedupeCommandMatrix(commands: string[][]) {
+  const seen = new Set<string>()
+  const deduped: string[][] = []
+
+  for (const command of commands) {
+    const key = command.join("\u0000")
+
+    if (seen.has(key)) {
+      continue
+    }
+
+    seen.add(key)
+    deduped.push(command)
+  }
+
+  return deduped
 }
 
 function dedupeStrings(values: string[]) {
@@ -1740,14 +1788,20 @@ function normalizeObjectiveCompletionCriteria(
 
   const changedArtifacts = dedupeStrings(criteria.changedArtifacts ?? [])
   const evaluationScenarios = dedupeStrings(criteria.evaluationScenarios ?? [])
+  const verificationCommands = normalizeVerificationCommandCriteria(criteria.verificationCommands)
 
-  if (changedArtifacts.length === 0 && evaluationScenarios.length === 0) {
+  if (
+    changedArtifacts.length === 0 &&
+    evaluationScenarios.length === 0 &&
+    verificationCommands.length === 0
+  ) {
     return null
   }
 
   return {
     ...(changedArtifacts.length > 0 ? { changedArtifacts } : {}),
     ...(evaluationScenarios.length > 0 ? { evaluationScenarios } : {}),
+    ...(verificationCommands.length > 0 ? { verificationCommands } : {}),
   }
 }
 
@@ -1762,8 +1816,10 @@ function normalizeObjectiveCompletionEvidence(
     satisfied: evidence.satisfied === true,
     changedArtifacts: dedupeStrings(evidence.changedArtifacts ?? []),
     passedEvaluationScenarios: dedupeStrings(evidence.passedEvaluationScenarios ?? []),
+    passedVerificationCommands: normalizeVerificationCommandCriteria(evidence.passedVerificationCommands),
     missingChangedArtifacts: dedupeStrings(evidence.missingChangedArtifacts ?? []),
     missingEvaluationScenarios: dedupeStrings(evidence.missingEvaluationScenarios ?? []),
+    missingVerificationCommands: normalizeVerificationCommandCriteria(evidence.missingVerificationCommands),
     checkedAt: evidence.checkedAt ?? new Date(0).toISOString(),
   }
 }
@@ -1780,6 +1836,9 @@ function areObjectiveCompletionCriteriaEqual(
     return {
       changedArtifacts: [...(criteria.changedArtifacts ?? [])].sort(),
       evaluationScenarios: [...(criteria.evaluationScenarios ?? [])].sort(),
+      verificationCommands: normalizeVerificationCommandCriteria(criteria.verificationCommands)
+        .map((command) => command.join("\u0000"))
+        .sort(),
     }
   }
 
@@ -1796,14 +1855,21 @@ function evaluateObjectiveCompletion(
       .filter((record) => record.exitCode === 0)
       .map((record) => record.scenarioName),
   )
+  const passedVerificationCommands = dedupeCommandMatrix(
+    iteration.verification
+      .filter((record) => record.exitCode === 0)
+      .map((record) => record.command),
+  )
 
   if (!criteria) {
     return {
       satisfied: false,
       changedArtifacts,
       passedEvaluationScenarios,
+      passedVerificationCommands,
       missingChangedArtifacts: [],
       missingEvaluationScenarios: [],
+      missingVerificationCommands: [],
       checkedAt: iteration.completedAt,
     }
   }
@@ -1814,16 +1880,24 @@ function evaluateObjectiveCompletion(
   const missingEvaluationScenarios = (criteria.evaluationScenarios ?? []).filter(
     (scenarioName) => !passedEvaluationScenarios.includes(scenarioName),
   )
+  const missingVerificationCommands = normalizeVerificationCommandCriteria(
+    criteria.verificationCommands,
+  ).filter(
+    (command) => !passedVerificationCommands.some((passedCommand) => areCommandsEqual(passedCommand, command)),
+  )
 
   return {
     satisfied:
       iteration.decision === "promoted" &&
       missingChangedArtifacts.length === 0 &&
-      missingEvaluationScenarios.length === 0,
+      missingEvaluationScenarios.length === 0 &&
+      missingVerificationCommands.length === 0,
     changedArtifacts,
     passedEvaluationScenarios,
+    passedVerificationCommands,
     missingChangedArtifacts,
     missingEvaluationScenarios,
+    missingVerificationCommands,
     checkedAt: iteration.completedAt,
   }
 }
@@ -1842,12 +1916,27 @@ function doesObjectiveCompletionEvidenceSatisfyCriteria(
   const missingEvaluationScenarios = (criteria.evaluationScenarios ?? []).filter(
     (scenarioName) => !evidence.passedEvaluationScenarios.includes(scenarioName),
   )
+  const missingVerificationCommands = normalizeVerificationCommandCriteria(
+    criteria.verificationCommands,
+  ).filter(
+    (command) =>
+      !evidence.passedVerificationCommands.some((passedCommand) => areCommandsEqual(passedCommand, command)),
+  )
 
   return (
     evidence.satisfied === true &&
     missingChangedArtifacts.length === 0 &&
-    missingEvaluationScenarios.length === 0
+    missingEvaluationScenarios.length === 0 &&
+    missingVerificationCommands.length === 0
   )
+}
+
+function areCommandsEqual(left: string[], right: string[]) {
+  return left.length === right.length && left.every((entry, index) => entry === right[index])
+}
+
+function formatCommandLabel(command: string[]) {
+  return command.join(" ")
 }
 
 function formatAutonomousLoopStatus(state: PersistedAutonomousLoopState): AutonomousLoopStatus {
