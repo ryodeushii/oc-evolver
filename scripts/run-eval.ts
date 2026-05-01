@@ -68,6 +68,44 @@ const OBJECTIVE_MEMORY_EVIDENCE_TOOLS = [
   "evolver_autonomous_status",
   "evolver_status",
 ] as const
+const COMMAND_RUNTIME_TOOLS = [
+  "evolver_write_memory",
+  "evolver_write_memory",
+  "evolver_apply_memory",
+  "evolver_write_command",
+  "evolver_run_command",
+] as const
+const REVISION_LIFECYCLE_TURN_ONE_TOOLS = [
+  "evolver_write_command",
+  "evolver_promote",
+  "evolver_delete_artifact",
+  "evolver_review_pending",
+] as const
+const REVISION_LIFECYCLE_TURN_TWO_TOOLS = [
+  "evolver_reject",
+  "evolver_prune",
+] as const
+const AUTONOMOUS_CONTROL_TURN_ONE_TOOLS = [
+  "evolver_autonomous_configure",
+  "evolver_autonomous_pause",
+] as const
+const AUTONOMOUS_CONTROL_TURN_TWO_TOOLS = [
+  "evolver_autonomous_resume",
+  "evolver_autonomous_status",
+] as const
+const AUTONOMOUS_CONTROL_CONFIGURE_INPUT = {
+  enabled: true,
+  paused: false,
+  intervalMs: 60_000,
+  verificationCommands: [["bun", "run", "typecheck"]],
+  evaluationScenarios: ["autonomous-run"],
+  failurePolicy: {
+    maxConsecutiveFailures: 3,
+    escalationAction: "pause_loop",
+  },
+  objectives: [],
+  replaceObjectives: true,
+} as const
 const AUTONOMOUS_RUN_OBJECTIVE_PROMPT =
   'Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.'
 const AUTONOMOUS_RUN_COMPLETION_CRITERIA = {
@@ -97,12 +135,15 @@ export const DEFAULT_SCENARIOS = [
   "smoke",
   "create-skill",
   "create-agent",
+  "command-runtime",
   "reuse-skill",
+  "revision-lifecycle",
   "policy-deny",
   "invalid-artifact",
   "memory-guided-write",
   "artifact-only-deny",
   "autonomous-run",
+  "autonomous-control",
   "rollback",
 ]
 
@@ -456,6 +497,119 @@ async function assertScenarioArtifacts(input: {
 
       return
     }
+    case "command-runtime": {
+      if (input.turns.length !== 1) {
+        throw new Error(`scenario command-runtime expected exactly 1 turn, got ${input.turns.length}`)
+      }
+
+      const executedToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const toolEvents = collectToolEvents(input.parsedResponses[0])
+
+      assertExactToolSequence(
+        executedToolSequence,
+        COMMAND_RUNTIME_TOOLS,
+        "scenario command-runtime did not follow the required memory-command tool path",
+      )
+
+      const writeMemoryEvents = toolEvents.filter((event) => event.tool === "evolver_write_memory")
+
+      if (
+        writeMemoryEvents.length !== 2 ||
+        readObjectStringField(writeMemoryEvents[0]?.input, "memoryName") !== "session-routing" ||
+        readObjectStringField(writeMemoryEvents[1]?.input, "memoryName") !== "command-routing"
+      ) {
+        throw new Error("scenario command-runtime did not write session-routing then command-routing")
+      }
+
+      const applyMemoryEvent = toolEvents.find((event) => event.tool === "evolver_apply_memory")
+      const runCommandEvent = toolEvents.find((event) => event.tool === "evolver_run_command")
+
+      if (!areJsonValuesEqual(applyMemoryEvent?.input, { memoryName: "session-routing" })) {
+        throw new Error("scenario command-runtime did not apply only the required session-routing memory")
+      }
+
+      if (
+        readObjectStringField(runCommandEvent?.input, "commandName") !== "review-markdown" ||
+        !readObjectStringField(runCommandEvent?.input, "prompt")?.includes("README.md")
+      ) {
+        throw new Error("scenario command-runtime did not run review-markdown against README.md")
+      }
+
+      const writeMemoryAuditEvents = auditEvents.filter(
+        (event) => event.action === "write_memory" && event.status === "success",
+      )
+
+      if (writeMemoryAuditEvents.length < 2) {
+        throw new Error("scenario command-runtime missing both write_memory audit events")
+      }
+
+      assertAuditAction(auditEvents, "apply_memory", "scenario command-runtime missing apply_memory audit event")
+      assertAuditAction(auditEvents, "write_command", "scenario command-runtime missing write_command audit event")
+      assertAuditAction(auditEvents, "run_command", "scenario command-runtime missing run_command audit event")
+
+      if (!registry.memories?.["session-routing"] || !registry.memories?.["command-routing"]) {
+        throw new Error("scenario command-runtime registry missing required memory entries")
+      }
+
+      if (!registry.commands?.["review-markdown"]) {
+        throw new Error("scenario command-runtime registry missing review-markdown command entry")
+      }
+
+      const commandSessionID = input.turns[0]?.sessionID
+
+      if (!commandSessionID) {
+        throw new Error("scenario command-runtime missing a persisted session id")
+      }
+
+      const sessionStatePath = join(
+        input.workspaceRoot,
+        ".opencode/oc-evolver/sessions",
+        `${encodeURIComponent(commandSessionID)}.json`,
+      )
+      const sessionState = JSON.parse(await readFile(sessionStatePath, "utf8")) as {
+        memories?: Record<string, { storageMode?: string }>
+        runtimePolicy?: {
+          sourceKind?: string
+          sourceName?: string
+          toolPermissions?: Record<string, string>
+          preferredModel?: string
+        }
+      }
+
+      if (!sessionState.memories?.["session-routing"] || !sessionState.memories?.["command-routing"]) {
+        throw new Error("scenario command-runtime missing persisted session and command memory state")
+      }
+
+      if (sessionState.runtimePolicy?.sourceKind !== "command") {
+        throw new Error("scenario command-runtime missing persisted command runtime policy")
+      }
+
+      if (
+        sessionState.runtimePolicy?.sourceName !== "review-markdown" ||
+        sessionState.runtimePolicy.toolPermissions?.edit !== "deny" ||
+        sessionState.runtimePolicy.preferredModel !== "openai/gpt-5.4"
+      ) {
+        throw new Error("scenario command-runtime persisted the wrong command runtime policy")
+      }
+
+      const commandDocument = await readFile(
+        join(input.workspaceRoot, ".opencode/commands/review-markdown.md"),
+        "utf8",
+      )
+      const commandFrontmatter = parseFrontmatter(commandDocument)
+
+      if (
+        commandFrontmatter.model !== "openai/gpt-5.4" ||
+        !Array.isArray(commandFrontmatter.memory) ||
+        !commandFrontmatter.memory.includes("command-routing") ||
+        !commandFrontmatter.permission ||
+        commandFrontmatter.permission.edit !== "deny"
+      ) {
+        throw new Error("scenario command-runtime command document is missing required command-owned metadata")
+      }
+
+      return
+    }
     case "artifact-only-deny": {
       assertAuditAction(auditEvents, "write_memory", "scenario artifact-only-deny missing write_memory audit event")
       assertAuditAction(auditEvents, "apply_memory", "scenario artifact-only-deny missing apply_memory audit event")
@@ -516,6 +670,138 @@ async function assertScenarioArtifacts(input: {
 
       return
     }
+    case "revision-lifecycle": {
+      if (input.turns.length !== 2) {
+        throw new Error(`scenario revision-lifecycle expected exactly 2 turns, got ${input.turns.length}`)
+      }
+
+      const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+
+      assertExactToolSequence(
+        turnOneToolSequence,
+        REVISION_LIFECYCLE_TURN_ONE_TOOLS,
+        "scenario revision-lifecycle did not follow the required turn-1 revision review path",
+      )
+      assertExactToolSequence(
+        turnTwoToolSequence,
+        REVISION_LIFECYCLE_TURN_TWO_TOOLS,
+        "scenario revision-lifecycle did not follow the required turn-2 reject/prune path",
+      )
+
+      assertAuditAction(auditEvents, "delete_artifact", "scenario revision-lifecycle missing delete_artifact audit event")
+      assertAuditAction(auditEvents, "review_pending", "scenario revision-lifecycle missing review_pending audit event")
+      assertAuditAction(auditEvents, "reject", "scenario revision-lifecycle missing reject audit event")
+      assertAuditAction(auditEvents, "prune", "scenario revision-lifecycle missing prune audit event")
+
+      const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+      const reviewPendingEvent = turnOneToolEvents.find((event) => event.tool === "evolver_review_pending")
+      const pendingReview = parseToolOutput(reviewPendingEvent?.output) as {
+        currentRevisionID?: string | null
+        pendingRevisionID?: string | null
+        changedArtifacts?: { commands?: string[] }
+      }
+      const pendingReviewArtifact = JSON.parse(
+        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/pending-review.json"), "utf8"),
+      ) as {
+        currentRevisionID?: string | null
+        pendingRevisionID?: string | null
+        changedArtifacts?: { commands?: string[] }
+      }
+      const pendingSnapshotEvidence = JSON.parse(
+        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/pending-review-snapshot.json"), "utf8"),
+      ) as {
+        pendingRevisionID?: string | null
+        snapshotPath?: string | null
+      }
+      const pendingDeletionState = JSON.parse(
+        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"), "utf8"),
+      ) as {
+        commandPresent?: boolean
+      }
+
+      if (
+        typeof pendingReview.currentRevisionID !== "string" ||
+        pendingReview.currentRevisionID.length === 0 ||
+        typeof pendingReview.pendingRevisionID !== "string" ||
+        pendingReview.pendingRevisionID.length === 0 ||
+        pendingReview.currentRevisionID === pendingReview.pendingRevisionID
+      ) {
+        throw new Error("scenario revision-lifecycle missing durable pending revision review evidence")
+      }
+
+      if (!pendingReview.changedArtifacts?.commands?.includes("review-markdown")) {
+        throw new Error("scenario revision-lifecycle pending review did not report the deleted command")
+      }
+
+      if (
+        pendingSnapshotEvidence.pendingRevisionID !== pendingReview.pendingRevisionID ||
+        pendingSnapshotEvidence.snapshotPath !==
+          `.opencode/oc-evolver/revisions/${pendingReview.pendingRevisionID}.json`
+      ) {
+        throw new Error("scenario revision-lifecycle missing durable evidence that the pending snapshot existed before prune")
+      }
+
+      if (pendingDeletionState.commandPresent !== false) {
+        throw new Error("scenario revision-lifecycle did not preserve durable evidence that the command was deleted in the pending revision")
+      }
+
+      if (
+        pendingReviewArtifact.currentRevisionID !== pendingReview.currentRevisionID ||
+        pendingReviewArtifact.pendingRevisionID !== pendingReview.pendingRevisionID ||
+        !pendingReviewArtifact.changedArtifacts?.commands?.includes("review-markdown")
+      ) {
+        throw new Error("scenario revision-lifecycle pending-review artifact did not match the reviewed output")
+      }
+
+      if (registry.pendingRevision !== null) {
+        throw new Error("scenario revision-lifecycle left a pending revision behind")
+      }
+
+      if (!registry.commands?.["review-markdown"]) {
+        throw new Error("scenario revision-lifecycle failed to restore the accepted command entry")
+      }
+
+      const commandDocument = await readFile(
+        join(input.workspaceRoot, ".opencode/commands/review-markdown.md"),
+        "utf8",
+      )
+
+      if (commandDocument.trim().length === 0) {
+        throw new Error("scenario revision-lifecycle did not restore a non-empty accepted command body")
+      }
+
+      if (typeof registry.currentRevision !== "string" || registry.currentRevision.length === 0) {
+        throw new Error("scenario revision-lifecycle missing the restored accepted revision id")
+      }
+
+      await readFile(
+        join(
+          input.workspaceRoot,
+          ".opencode/oc-evolver/revisions",
+          `${registry.currentRevision}.json`,
+        ),
+        "utf8",
+      )
+
+      try {
+        await readFile(
+          join(
+            input.workspaceRoot,
+            ".opencode/oc-evolver/revisions",
+            `${pendingReview.pendingRevisionID}.json`,
+          ),
+          "utf8",
+        )
+        throw new Error("scenario revision-lifecycle did not prune the obsolete revision snapshot")
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+          throw error
+        }
+      }
+
+      return
+    }
     case "rollback": {
       const promoteEvents = auditEvents.filter(
         (event) => event.action === "promote" && event.status === "success",
@@ -550,6 +836,166 @@ async function assertScenarioArtifacts(input: {
 
       if (registry.pendingRevision !== null) {
         throw new Error("scenario rollback left a pending revision behind")
+      }
+
+      return
+    }
+    case "autonomous-control": {
+      if (input.turns.length !== 2) {
+        throw new Error(`scenario autonomous-control expected exactly 2 turns, got ${input.turns.length}`)
+      }
+
+      const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+      const turnTwoToolEvents = collectToolEvents(input.parsedResponses[1])
+
+      assertAuditAction(auditEvents, "autonomous_pause", "scenario autonomous-control missing autonomous_pause audit event")
+      assertAuditAction(auditEvents, "autonomous_resume", "scenario autonomous-control missing autonomous_resume audit event")
+
+      assertExactToolSequence(
+        turnOneToolSequence,
+        AUTONOMOUS_CONTROL_TURN_ONE_TOOLS,
+        "scenario autonomous-control did not follow the required turn-1 configure/pause path",
+      )
+
+      assertExactToolSequence(
+        turnTwoToolSequence,
+        AUTONOMOUS_CONTROL_TURN_TWO_TOOLS,
+        "scenario autonomous-control did not follow the required turn-2 resume/status path",
+      )
+
+      const configureEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_configure")
+
+      if (!configureEvent?.input) {
+        throw new Error("scenario autonomous-control did not expose the required configure payload")
+      }
+
+      if (!areJsonValuesEqual(configureEvent.input, AUTONOMOUS_CONTROL_CONFIGURE_INPUT)) {
+        throw new Error("scenario autonomous-control did not use the required configure payload")
+      }
+
+      const pauseEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_pause")
+      const pausedSnapshot = parseToolOutput(pauseEvent?.output) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+        }
+      }
+      const pausedArtifact = JSON.parse(
+        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/autonomous-loop-paused.json"), "utf8"),
+      ) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+        }
+      }
+
+      if (
+        pausedSnapshot.config?.enabled !== true ||
+        pausedSnapshot.config?.paused !== true ||
+        pausedSnapshot.config?.intervalMs !== 60_000
+      ) {
+        throw new Error("scenario autonomous-control missing durable paused-state evidence after turn 1")
+      }
+
+      if (
+        pausedArtifact.config?.enabled !== pausedSnapshot.config?.enabled ||
+        pausedArtifact.config?.paused !== pausedSnapshot.config?.paused ||
+        pausedArtifact.config?.intervalMs !== pausedSnapshot.config?.intervalMs
+      ) {
+        throw new Error("scenario autonomous-control paused-state artifact did not match the pause output")
+      }
+
+      const resumeEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_autonomous_resume")
+      const statusEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const resumedState = parseToolOutput(resumeEvent?.output) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+        }
+        activation?: {
+          mode?: string
+        }
+      }
+
+      if (
+        resumedState.config?.enabled !== true ||
+        resumedState.config?.paused !== false ||
+        resumedState.config?.intervalMs !== 60_000 ||
+        resumedState.activation?.mode !== "worker"
+      ) {
+        throw new Error("scenario autonomous-control resume output did not reflect the resumed worker state")
+      }
+
+      const statusState = parseToolOutput(statusEvent?.output) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+        }
+      }
+
+      if (
+        statusState.config?.enabled !== true ||
+        statusState.config?.paused !== false ||
+        statusState.config?.intervalMs !== 60_000 ||
+        JSON.stringify(statusState.config?.verificationCommands ?? []) !==
+          JSON.stringify([["bun", "run", "typecheck"]]) ||
+        JSON.stringify(statusState.config?.evaluationScenarios ?? []) !==
+          JSON.stringify(["autonomous-run"])
+      ) {
+        throw new Error("scenario autonomous-control status output did not reflect the resumed configured state")
+      }
+
+      const loopState = JSON.parse(
+        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"), "utf8"),
+      ) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+          failurePolicy?: {
+            maxConsecutiveFailures?: number
+            escalationAction?: string
+          }
+        }
+        iterations?: unknown[]
+      }
+
+      if (loopState.config?.enabled !== true || loopState.config?.paused !== false) {
+        throw new Error("scenario autonomous-control did not end in the resumed enabled state")
+      }
+
+      if (loopState.config?.intervalMs !== 60_000) {
+        throw new Error("scenario autonomous-control did not persist intervalMs: 60000")
+      }
+
+      if (
+        JSON.stringify(loopState.config?.verificationCommands ?? []) !==
+          JSON.stringify([["bun", "run", "typecheck"]]) ||
+        JSON.stringify(loopState.config?.evaluationScenarios ?? []) !==
+          JSON.stringify(["autonomous-run"])
+      ) {
+        throw new Error("scenario autonomous-control did not persist the configured verification/evaluation settings")
+      }
+
+      if (
+        loopState.config?.failurePolicy?.maxConsecutiveFailures !== 3 ||
+        loopState.config?.failurePolicy?.escalationAction !== "pause_loop"
+      ) {
+        throw new Error("scenario autonomous-control did not persist the required failurePolicy")
+      }
+
+      if ((loopState.iterations ?? []).length !== 0) {
+        throw new Error("scenario autonomous-control unexpectedly recorded loop iterations")
       }
 
       return
@@ -801,7 +1247,7 @@ function collectExecutedToolSequence(parsedResponse: ParsedEvalResponse | undefi
 }
 
 function collectToolEvents(parsedResponse: ParsedEvalResponse | undefined) {
-  const toolEvents: Array<{ tool: string; input?: unknown }> = []
+  const toolEvents: Array<{ tool: string; input?: unknown; output?: unknown }> = []
 
   walkParsedResponse(parsedResponse, undefined, undefined, toolEvents)
 
@@ -849,11 +1295,48 @@ function areJsonValuesEqual(left: unknown, right: unknown): boolean {
   return Object.is(left, right)
 }
 
+function parseToolOutput(output: unknown) {
+  if (typeof output !== "string") {
+    return output ?? null
+  }
+
+  try {
+    return JSON.parse(output)
+  } catch {
+    return output
+  }
+}
+
+function readObjectStringField(value: unknown, key: string) {
+  if (!value || typeof value !== "object") {
+    return null
+  }
+
+  const fieldValue = (value as Record<string, unknown>)[key]
+
+  return typeof fieldValue === "string" ? fieldValue : null
+}
+
+function parseFrontmatter(document: string) {
+  const match = document.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/)
+
+  if (!match) {
+    return {}
+  }
+
+  try {
+    const parsed = Bun.YAML.parse(match[1] ?? "")
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
 function walkParsedResponse(
   value: unknown,
   toolNames?: Set<string>,
   toolSequence?: string[],
-  toolEvents?: Array<{ tool: string; input?: unknown }>,
+  toolEvents?: Array<{ tool: string; input?: unknown; output?: unknown }>,
 ) {
   if (Array.isArray(value)) {
     for (const entry of value) {
@@ -879,9 +1362,19 @@ function walkParsedResponse(
         : "input" in value
           ? value.input
           : undefined
+    const output =
+      "state" in value &&
+      value.state &&
+      typeof value.state === "object" &&
+      "output" in value.state
+        ? value.state.output
+        : "output" in value
+          ? value.output
+          : undefined
     toolEvents?.push({
       tool: value.tool,
       input,
+      output,
     })
   }
 
@@ -909,6 +1402,7 @@ async function readRegistry(workspaceRoot: string) {
     await readFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
   ) as {
     skills?: Record<string, { helperPaths?: string[] }>
+    commands?: Record<string, unknown>
     memories?: Record<string, unknown>
     currentRevision?: string | null
     pendingRevision?: string | null

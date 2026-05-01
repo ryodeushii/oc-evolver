@@ -566,38 +566,56 @@ export function createOCEvolverPlugin(
           description: "Pause scheduled autonomous loop runs",
           args: {},
           async execute() {
-            return JSON.stringify(
-              await setAutonomousLoopPaused({
-                pluginFilePath,
-                runtimeContract,
-                paused: true,
-              }),
-              null,
-              2,
-            )
+            const result = await setAutonomousLoopPaused({
+              pluginFilePath,
+              runtimeContract,
+              paused: true,
+            })
+
+            await appendAuditEvent({
+              pluginFilePath,
+              runtimeContract,
+              event: {
+                action: "autonomous_pause",
+                status: "success",
+                target: ".opencode/oc-evolver/autonomous-loop.json",
+                detail: "paused autonomous loop",
+              },
+            })
+
+            return JSON.stringify(result, null, 2)
           },
         }),
         evolver_autonomous_resume: tool({
           description: "Activate autonomous loop execution after a pause",
           args: {},
           async execute() {
-            return JSON.stringify(
-              await (dependencies.activateAutonomousLoop ?? activateAutonomousLoop)(
-                {
-                  repoRoot: autonomousRepoRoot,
-                  pluginFilePath,
-                  runtimeContract,
-                },
-                {
-                  runEvaluationScenario: runLoopEvaluationScenario,
-                },
-                {
-                  resumePaused: true,
-                },
-              ),
-              null,
-              2,
+            const result = await (dependencies.activateAutonomousLoop ?? activateAutonomousLoop)(
+              {
+                repoRoot: autonomousRepoRoot,
+                pluginFilePath,
+                runtimeContract,
+              },
+              {
+                runEvaluationScenario: runLoopEvaluationScenario,
+              },
+              {
+                resumePaused: true,
+              },
             )
+
+            await appendAuditEvent({
+              pluginFilePath,
+              runtimeContract,
+              event: {
+                action: "autonomous_resume",
+                status: "success",
+                target: ".opencode/oc-evolver/autonomous-loop.json",
+                detail: "resumed autonomous loop",
+              },
+            })
+
+            return JSON.stringify(result, null, 2)
           },
         }),
         evolver_autonomous_run: tool({
@@ -718,11 +736,20 @@ export function createOCEvolverPlugin(
           description: "Show pending revision review details",
           args: {},
           async execute() {
-            return JSON.stringify(
-              await getPendingRevisionReview(pluginFilePath, runtimeContract),
-              null,
-              2,
-            )
+            const result = await getPendingRevisionReview(pluginFilePath, runtimeContract)
+
+            await appendAuditEvent({
+              pluginFilePath,
+              runtimeContract,
+              event: {
+                action: "review_pending",
+                status: "success",
+                target: ".opencode/oc-evolver/pending-review.json",
+                detail: "read pending revision review details",
+              },
+            })
+
+            return JSON.stringify(result, null, 2)
           },
         }),
         evolver_prune: tool({
