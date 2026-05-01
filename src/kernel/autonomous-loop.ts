@@ -98,7 +98,7 @@ type AutonomousLoopEvaluationRecord = {
   changedFiles: string[]
 }
 
-type AutonomousLoopObjectiveSource = "manual" | "repair" | "invalid_artifact" | "learning"
+type AutonomousLoopObjectiveSource = "manual" | "repair" | "invalid_artifact" | "learning" | "health"
 
 type AutonomousLoopObjective = {
   prompt: string
@@ -250,6 +250,7 @@ const MAX_AUTONOMOUS_LOOP_REPAIR_ATTEMPTS = 1
 const MAX_AUTONOMOUS_LOOP_LOCK_AGE_MS = 60 * 60 * 1000
 const AUTONOMOUS_LOOP_LOCK_METADATA_FILE = "metadata.json"
 const MAX_ITERATION_HISTORY = 20
+const RECENT_AUTONOMOUS_FAILURE_WINDOW = 5
 const activeAutonomousLoopWorkers = new Map<string, ActiveAutonomousLoopWorker>()
 
 export async function configureAutonomousLoop(input: {
@@ -295,7 +296,7 @@ export async function configureAutonomousLoop(input: {
     objectives: nextObjectives,
   }
 
-  nextState.latestLearning = buildLatestLearning(nextState.iterations.at(-1) ?? null, nextState.objectives)
+  nextState.latestLearning = buildLatestLearning(nextState.iterations, nextState.objectives)
 
   await persistAutonomousLoopState({
     pluginFilePath: input.pluginFilePath,
@@ -483,7 +484,8 @@ export type AutonomousLoopPreview = {
 
 type ResolvedAutonomousObjective = {
   objectivePrompt: string | null
-  mutationPrompt: string
+  mutationPrompt: string | null
+  skipReason: string | null
 }
 
 export async function previewAutonomousIteration(input: {
@@ -542,6 +544,9 @@ export async function previewAutonomousIteration(input: {
   } else if (lockHeld) {
     wouldRun = false
     wouldSkipReason = "autonomous loop lock is already held (another iteration may be running)"
+  } else if (resolvedObjective.skipReason) {
+    wouldRun = false
+    wouldSkipReason = resolvedObjective.skipReason
   }
 
   const runtimeContractCompatible = input.runtimeContract.runFlags.includes("--dangerously-skip-permissions") &&
@@ -740,7 +745,7 @@ export async function runAutonomousIteration(
         pendingRevisionID: null,
         promotedRevisionID: null,
         rejectionReason: lockAcquisition.reason,
-        prompt: resolvedObjective.mutationPrompt,
+        prompt: resolvedObjective.mutationPrompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
         objectivePrompt: resolvedObjective.objectivePrompt,
         verification: [],
         evaluations: [],
@@ -759,6 +764,28 @@ export async function runAutonomousIteration(
     const resolvedObjective = resolveAutonomousObjective(state, input.prompt)
     const objectivePrompt = resolvedObjective.objectivePrompt
 
+    if (resolvedObjective.skipReason) {
+      return await finalizeAutonomousIteration({
+        pluginFilePath: input.pluginFilePath,
+        runtimeContract: input.runtimeContract,
+        state,
+        iteration: {
+          startedAt,
+          completedAt: new Date().toISOString(),
+          sessionID: null,
+          decision: "skipped_unrunnable",
+          pendingRevisionID: null,
+          promotedRevisionID: null,
+          rejectionReason: resolvedObjective.skipReason,
+          prompt: DEFAULT_AUTONOMOUS_LOOP_PROMPT,
+          objectivePrompt: null,
+          verification: [],
+          evaluations: [],
+          changedArtifacts: [],
+        },
+      })
+    }
+
     if (state.config.paused) {
       return await finalizeAutonomousIteration({
         pluginFilePath: input.pluginFilePath,
@@ -772,7 +799,7 @@ export async function runAutonomousIteration(
           pendingRevisionID: null,
           promotedRevisionID: null,
           rejectionReason: "autonomous loop skipped: loop is paused",
-          prompt: resolvedObjective.mutationPrompt,
+          prompt: resolvedObjective.mutationPrompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
           objectivePrompt,
           verification: [],
           evaluations: [],
@@ -781,7 +808,7 @@ export async function runAutonomousIteration(
       })
     }
 
-    const mutationPrompt = resolvedObjective.mutationPrompt
+    const mutationPrompt = resolvedObjective.mutationPrompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT
     const configuredVerificationCommands = normalizeCommandMatrix(
       input.verificationCommands ?? state.config.verificationCommands,
       DEFAULT_VERIFICATION_COMMANDS,
@@ -1620,7 +1647,7 @@ async function finalizeAutonomousIteration(input: {
     config: escalation.config,
     lastSessionID: input.iteration.sessionID ?? input.state.lastSessionID,
     latestLearning: buildLatestLearning(
-      input.iteration,
+      [...input.state.iterations, input.iteration].slice(-MAX_ITERATION_HISTORY),
       escalation.objectives,
       escalation.config.failurePolicy.lastEscalationReason,
     ),
@@ -1657,7 +1684,7 @@ async function refreshDerivedObjectives(input: {
   const nextState: PersistedAutonomousLoopState = {
     ...input.state,
     latestLearning: buildLatestLearning(
-      input.state.iterations.at(-1) ?? null,
+      input.state.iterations,
       nextObjectives,
       input.state.config.failurePolicy.lastEscalationReason,
     ),
@@ -1723,7 +1750,7 @@ async function collectDerivedObjectiveProposals(input: {
   const proposals: Array<{
     prompt: string
     priority: number
-    source: "invalid_artifact" | "learning"
+    source: "invalid_artifact" | "learning" | "health"
     rationale: string
     completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
   }> = []
@@ -1741,6 +1768,11 @@ async function collectDerivedObjectiveProposals(input: {
   }
 
   const learningProposal = buildLatestLearningObjectiveProposal(input.state)
+  const healthProposal = buildHealthEvidenceObjectiveProposal(input.state)
+
+  if (healthProposal) {
+    proposals.push(healthProposal)
+  }
 
   if (learningProposal) {
     proposals.push(learningProposal)
@@ -1752,7 +1784,7 @@ async function collectDerivedObjectiveProposals(input: {
 function createDerivedObjectiveFromProposal(proposal: {
   prompt: string
   priority: number
-  source: "invalid_artifact" | "learning"
+  source: "invalid_artifact" | "learning" | "health"
   rationale: string
   completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
 }): AutonomousLoopObjective | null {
@@ -1863,8 +1895,140 @@ function buildLatestLearningObjectiveProposal(
   }
 }
 
+function buildHealthEvidenceObjectiveProposal(
+  state: PersistedAutonomousLoopState,
+): {
+  prompt: string
+  priority: number
+  source: "health"
+  rationale: string
+  completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
+} | null {
+  const recentFailures = state.iterations
+    .filter((iteration) => iteration.decision === "rejected" || iteration.decision === "rolled_back")
+    .slice(-RECENT_AUTONOMOUS_FAILURE_WINDOW)
+
+  if (recentFailures.length < 2) {
+    return null
+  }
+
+  const repeatedArtifacts = collectRepeatedStrings(
+    recentFailures.flatMap((iteration) => dedupeStrings(iteration.changedArtifacts)),
+    2,
+  )
+  const repeatedVerificationCommands = collectRepeatedCommands(
+    recentFailures.flatMap((iteration) =>
+      dedupeCommandMatrix(
+        iteration.verification
+          .filter((record) => record.exitCode !== 0)
+          .map((record) => record.command),
+      ),
+    ),
+    2,
+  )
+  const repeatedEvaluationScenarios = collectRepeatedStrings(
+    recentFailures.flatMap((iteration) =>
+      dedupeStrings(
+        iteration.evaluations
+          .filter((record) => record.exitCode !== 0)
+          .map((record) => record.scenarioName),
+      ),
+    ),
+    2,
+  )
+  const completionCriteria = normalizeObjectiveCompletionCriteria({
+    changedArtifacts: repeatedArtifacts,
+    verificationCommands: repeatedVerificationCommands,
+    evaluationScenarios: repeatedEvaluationScenarios,
+  })
+
+  if (!completionCriteria) {
+    return null
+  }
+
+  return {
+    prompt: buildAutonomousFailureObjectivePrompt({
+      objectivePrompt: DEFAULT_AUTONOMOUS_LOOP_PROMPT,
+      rejectionReason: "Repeated autonomous-loop failures across recent bounded iterations.",
+      completionCriteria,
+    }),
+    priority: -75,
+    source: "health",
+    rationale:
+      "Repeated autonomous-loop failures across recent bounded iterations with the same evidence.",
+    completionCriteria,
+  }
+}
+
 function isDerivedObjectiveSource(source: AutonomousLoopObjectiveSource) {
-  return source === "invalid_artifact" || source === "learning"
+  return source === "invalid_artifact" || source === "learning" || source === "health"
+}
+
+function collectRepeatedStrings(entries: string[], minimumCount: number) {
+  const counts = new Map<string, number>()
+
+  for (const entry of entries) {
+    counts.set(entry, (counts.get(entry) ?? 0) + 1)
+  }
+
+  return Array.from(counts.entries())
+    .filter(([, count]) => count >= minimumCount)
+    .map(([entry]) => entry)
+    .sort((left, right) => left.localeCompare(right))
+}
+
+function collectRepeatedCommands(entries: string[][], minimumCount: number) {
+  const counts = new Map<string, { command: string[]; count: number }>()
+
+  for (const command of entries) {
+    const key = JSON.stringify(command)
+    const current = counts.get(key)
+
+    if (current) {
+      current.count += 1
+      continue
+    }
+
+    counts.set(key, { command, count: 1 })
+  }
+
+  return Array.from(counts.values())
+    .filter((entry) => entry.count >= minimumCount)
+    .map((entry) => entry.command)
+    .sort((left, right) => formatCommandLabel(left).localeCompare(formatCommandLabel(right)))
+}
+
+function collectRecentLearningEvidence(iterations: PersistedAutonomousLoopIteration[]) {
+  const recentFailures = iterations
+    .filter((iteration) => iteration.decision === "rejected" || iteration.decision === "rolled_back")
+    .slice(-RECENT_AUTONOMOUS_FAILURE_WINDOW)
+
+  return {
+    failedVerificationCommands: collectRepeatedCommands(
+      recentFailures.flatMap((iteration) =>
+        dedupeCommandMatrix(
+          iteration.verification
+            .filter((record) => record.exitCode !== 0)
+            .map((record) => record.command),
+        ),
+      ),
+      2,
+    ),
+    failedEvaluationScenarios: collectRepeatedStrings(
+      recentFailures.flatMap((iteration) =>
+        dedupeStrings(
+          iteration.evaluations
+            .filter((record) => record.exitCode !== 0)
+            .map((record) => record.scenarioName),
+        ),
+      ),
+      2,
+    ),
+    changedArtifacts: collectRepeatedStrings(
+      recentFailures.flatMap((iteration) => dedupeStrings(iteration.changedArtifacts)),
+      2,
+    ),
+  }
 }
 
 function areObjectivesEquivalent(left: AutonomousLoopObjective[], right: AutonomousLoopObjective[]) {
@@ -1970,10 +2134,11 @@ async function runEvaluationScenarios(input: {
 }
 
 function buildLatestLearning(
-  iteration: PersistedAutonomousLoopIteration | null,
+  iterations: PersistedAutonomousLoopIteration[],
   objectives: AutonomousLoopObjective[],
   lastEscalationReason: string | null = null,
 ): PersistedAutonomousLoopLearning | null {
+  const iteration = iterations.at(-1) ?? null
   const remainingObjectives = objectives
     .filter((objective) => objective.status === "pending")
     .map((objective) => objective.prompt)
@@ -1998,14 +2163,27 @@ function buildLatestLearning(
   const latestObjective = iteration.objectivePrompt
     ? objectives.find((objective) => objective.prompt === iteration.objectivePrompt) ?? null
     : null
-  const failedVerificationCommands = dedupeCommandMatrix(
+  const recentLearningEvidence = collectRecentLearningEvidence(iterations)
+  const latestFailedVerificationCommands = dedupeCommandMatrix(
     iteration.verification
       .filter((record) => record.exitCode !== 0)
       .map((record) => record.command),
   )
-  const failedEvaluationScenarios = iteration.evaluations
+  const latestFailedEvaluationScenarios = iteration.evaluations
     .filter((record) => record.exitCode !== 0)
     .map((record) => record.scenarioName)
+  const failedVerificationCommands =
+    recentLearningEvidence.failedVerificationCommands.length > 0
+      ? recentLearningEvidence.failedVerificationCommands
+      : latestFailedVerificationCommands
+  const failedEvaluationScenarios =
+    recentLearningEvidence.failedEvaluationScenarios.length > 0
+      ? recentLearningEvidence.failedEvaluationScenarios
+      : latestFailedEvaluationScenarios
+  const changedArtifacts =
+    recentLearningEvidence.changedArtifacts.length > 0
+      ? recentLearningEvidence.changedArtifacts
+      : dedupeStrings(iteration.changedArtifacts)
 
   if (iteration.decision === "promoted") {
     return {
@@ -2018,7 +2196,7 @@ function buildLatestLearning(
       rejectionReason: iteration.rejectionReason,
       failedVerificationCommands,
       failedEvaluationScenarios,
-      changedArtifacts: iteration.changedArtifacts,
+      changedArtifacts,
     }
   }
 
@@ -2030,7 +2208,7 @@ function buildLatestLearning(
       rejectionReason: iteration.rejectionReason,
       failedVerificationCommands,
       failedEvaluationScenarios,
-      changedArtifacts: iteration.changedArtifacts,
+      changedArtifacts,
     }
   }
 
@@ -2042,7 +2220,7 @@ function buildLatestLearning(
       rejectionReason: iteration.rejectionReason,
       failedVerificationCommands,
       failedEvaluationScenarios,
-      changedArtifacts: iteration.changedArtifacts,
+      changedArtifacts,
     }
   }
 
@@ -2053,7 +2231,7 @@ function buildLatestLearning(
     rejectionReason: null,
     failedVerificationCommands,
     failedEvaluationScenarios,
-    changedArtifacts: iteration.changedArtifacts,
+    changedArtifacts,
   }
 }
 
@@ -2125,8 +2303,8 @@ function normalizeAutonomousLoopState(
   rawState: Partial<PersistedAutonomousLoopState> & LegacyPersistedAutonomousLoopState,
 ): PersistedAutonomousLoopState {
   const emptyState = emptyAutonomousLoopState()
-  const objectives = Array.isArray(rawState.objectives)
-    ? rawState.objectives.flatMap((objective) => {
+  const objectives: AutonomousLoopObjective[] = Array.isArray(rawState.objectives)
+    ? rawState.objectives.flatMap((objective): AutonomousLoopObjective[] => {
         const completionCriteria = normalizeObjectiveCompletionCriteria(objective.completionCriteria)
 
         if (!completionCriteria) {
@@ -2147,16 +2325,19 @@ function normalizeAutonomousLoopState(
               ? "completed"
               : "pending"
 
-        return {
+        const source: AutonomousLoopObjectiveSource =
+          objective.source === "repair" ||
+          objective.source === "invalid_artifact" ||
+          objective.source === "learning" ||
+          objective.source === "health"
+            ? objective.source
+            : "manual"
+
+        return [{
           prompt: objective.prompt,
           priority: typeof objective.priority === "number" ? objective.priority : 0,
           status,
-          source:
-            objective.source === "repair" ||
-            objective.source === "invalid_artifact" ||
-            objective.source === "learning"
-              ? objective.source
-              : "manual",
+          source,
           rationale: typeof objective.rationale === "string" ? objective.rationale : null,
           completionCriteria,
           lastCompletionEvidence,
@@ -2167,7 +2348,7 @@ function normalizeAutonomousLoopState(
           lastSessionID: objective.lastSessionID ?? null,
           lastDecision: objective.lastDecision ?? null,
           lastEscalationReason: objective.lastEscalationReason ?? null,
-        }
+        }]
       })
     : []
   const iterations = Array.isArray(rawState.iterations)
@@ -2220,7 +2401,7 @@ function normalizeAutonomousLoopState(
     },
     lastSessionID: rawState.lastSessionID ?? null,
     latestLearning: buildLatestLearning(
-      iterations.at(-1) ?? null,
+      iterations,
       objectives,
       normalizeFailurePolicy(rawState.config?.failurePolicy, emptyState.config.failurePolicy)
         .lastEscalationReason,
@@ -2441,12 +2622,18 @@ function resolveAutonomousObjective(
 ): ResolvedAutonomousObjective {
   const objectivePrompt = selectObjectivePrompt(state, overridePrompt)
 
+   if (!objectivePrompt) {
+    return {
+      objectivePrompt: null,
+      mutationPrompt: null,
+      skipReason: "no bounded objective available",
+    }
+  }
+
   return {
     objectivePrompt,
-    mutationPrompt: buildAutonomousPrompt(
-      objectivePrompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
-      state.latestLearning,
-    ),
+    mutationPrompt: buildAutonomousPrompt(objectivePrompt, state.latestLearning),
+    skipReason: null,
   }
 }
 

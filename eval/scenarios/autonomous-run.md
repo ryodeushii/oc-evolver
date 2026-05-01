@@ -17,6 +17,7 @@ Use these exact tool calls in order.
      [
         {
           "prompt": "Make exactly one mutation by calling evolver_write_memory with memoryName \"autonomous-evidence-memory\" and document \"---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.\". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.",
+          "priority": 0,
           "completionCriteria": {
             "changedArtifacts": ["memory:autonomous-evidence-memory"],
             "evaluationScenarios": ["objective-memory-evidence"],

@@ -761,6 +761,7 @@ describe("autonomous loop", () => {
       repoRoot,
       pluginFilePath,
       runtimeContract,
+      prompt: "Update autonomous review flow and keep post-promotion checks green.",
       verificationCommands: [["bun", "run", "typecheck"]],
       evaluationScenarios: ["objective-proof"],
       executeCommand: async ({ command }) => {
@@ -847,6 +848,22 @@ Review README.md once.
       },
     })
     await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [
+        {
+          prompt: "Improve the autonomous review flow while keeping objective proof green.",
+          completionCriteria: {
+            changedArtifacts: ["command:autonomous-review"],
+            evaluationScenarios: ["objective-proof"],
+            verificationCommands: [["bun", "run", "typecheck"]],
+          },
+        },
+      ],
+    })
 
     let verificationRuns = 0
     let evaluationRuns = 0
@@ -1584,6 +1601,7 @@ Review README.md twice.
       repoRoot,
       pluginFilePath,
       runtimeContract,
+      prompt: "Run evaluator preflight check.",
       evaluationScenarios: ["autonomous-run"],
       executeCommand: async ({ command }) => {
         const probeResult = runtimeContractProbeResult(command)
@@ -1777,6 +1795,7 @@ Review README.md twice.
       repoRoot,
       pluginFilePath,
       runtimeContract,
+      prompt: "Run runtime-contract version preflight.",
       evaluationScenarios: [],
       executeCommand: async ({ command }) => {
         executedCommands.push(command)
@@ -1807,6 +1826,7 @@ Review README.md twice.
       repoRoot,
       pluginFilePath,
       runtimeContract,
+      prompt: "Run runtime-contract flag preflight.",
       executeCommand: async ({ command }) => {
         executedCommands.push(command)
 
@@ -2974,6 +2994,7 @@ Review README.md twice.
       repoRoot,
       pluginFilePath,
       runtimeContract,
+      prompt: "Review the current project state and leave the workspace in a verified state.",
       verificationCommands: [["bun", "run", "typecheck"]],
       evaluationScenarios: [],
       executeCommand: async ({ command }) => {
@@ -3023,6 +3044,71 @@ Review README.md twice.
     expect(result.decision).toBe("rejected")
     expect(derivedObjective).toBeTruthy()
     expect(derivedObjective?.status).toBe("pending")
+    expect(derivedObjective?.completionCriteria).toMatchObject({
+      changedArtifacts: ["command:autonomous-review"],
+      verificationCommands: [["bun", "run", "typecheck"]],
+    })
+  })
+
+  test("derives a bounded health objective from durable loop evidence when the queue is empty", async () => {
+    for (let index = 0; index < 3; index += 1) {
+      await runAutonomousIteration({
+        repoRoot,
+        pluginFilePath,
+        runtimeContract,
+        prompt: "Review the current project state and leave the workspace in a verified state.",
+        verificationCommands: [["bun", "run", "typecheck"]],
+        evaluationScenarios: [],
+        executeCommand: async ({ command }) => {
+          const probeResult = runtimeContractProbeResult(command)
+
+          if (probeResult) {
+            return probeResult
+          }
+
+          if (command[0] === "opencode") {
+            await applyMutationTransaction({
+              pluginFilePath,
+              runtimeContract,
+              mutation: {
+                kind: "command",
+                name: "autonomous-review",
+                document: `---\ndescription: Autonomous review ${index + 1}\n---\n\nReview autonomously.\n`,
+              },
+            })
+
+            return {
+              stdout: `{"type":"step_start","sessionID":"session-health-${index + 1}"}\n`,
+              stderr: "",
+              exitCode: 0,
+            }
+          }
+
+          return {
+            stdout: "",
+            stderr: "verification failed",
+            exitCode: 1,
+          }
+        },
+      })
+
+      await configureAutonomousLoop({
+        pluginFilePath,
+        runtimeContract,
+        replaceObjectives: true,
+        objectives: [],
+      })
+    }
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    const derivedObjective = status.objectives.find((objective) => objective.source === "health")
+
+    expect(derivedObjective).toBeTruthy()
+    expect(derivedObjective?.rationale).toContain("Repeated autonomous-loop failures")
     expect(derivedObjective?.completionCriteria).toMatchObject({
       changedArtifacts: ["command:autonomous-review"],
       verificationCommands: [["bun", "run", "typecheck"]],
@@ -3202,13 +3288,14 @@ Review README.md twice.
     ])
   })
 
-  test("produces a directed default autonomous prompt when no objective is queued", async () => {
+  test("runs an explicit prompt override when no objective is queued", async () => {
     const mutationPrompts: string[] = []
 
     await runAutonomousIteration({
       repoRoot,
       pluginFilePath,
       runtimeContract,
+      prompt: "Review the current project state, consult autonomous-loop status and prior learning, make one concrete improvement, and leave the workspace in a verified state.",
       verificationCommands: [["bun", "run", "typecheck"]],
       evaluationScenarios: [],
       executeCommand: async ({ command }) => {
@@ -3253,7 +3340,7 @@ Review README.md twice.
     expect(prompt).not.toContain("Previous autonomous-loop learning")
   })
 
-  test("preview agrees that the loop will run the default prompt when no objective is queued", async () => {
+  test("preview and run skip when no bounded objective is available", async () => {
     await configureAutonomousLoop({
       pluginFilePath,
       runtimeContract,
@@ -3267,9 +3354,7 @@ Review README.md twice.
       pluginFilePath,
       runtimeContract,
     })
-    const mutationPrompts: string[] = []
-
-    await runAutonomousIteration({
+    const result = await runAutonomousIteration({
       repoRoot,
       pluginFilePath,
       runtimeContract,
@@ -3283,23 +3368,7 @@ Review README.md twice.
         }
 
         if (command[0] === "opencode") {
-          mutationPrompts.push(command.at(-1) ?? "")
-
-          await applyMutationTransaction({
-            pluginFilePath,
-            runtimeContract,
-            mutation: {
-              kind: "command",
-              name: "autonomous-preview-review",
-              document: "---\ndescription: Autonomous preview review\n---\n\nReview autonomously.\n",
-            },
-          })
-
-          return {
-            stdout: '{"type":"step_start","sessionID":"session-preview-default-prompt"}\n',
-            stderr: "",
-            exitCode: 0,
-          }
+          throw new Error("mutation should not run when no bounded objective exists")
         }
 
         return {
@@ -3310,11 +3379,12 @@ Review README.md twice.
       },
     })
 
-    expect(preview.wouldRun).toBe(true)
-    expect(preview.wouldSkipReason).toBeNull()
+    expect(preview.wouldRun).toBe(false)
+    expect(preview.wouldSkipReason).toBe("no bounded objective available")
     expect(preview.selectedObjective).toBeNull()
-    expect(preview.mutationPrompt).toContain("Review the current project state")
-    expect(mutationPrompts[0]).toBe(preview.mutationPrompt)
+    expect(preview.mutationPrompt).toBeNull()
+    expect(result.decision).toBe("skipped_unrunnable")
+    expect(result.rejectionReason).toBe("no bounded objective available")
   })
 
   test("injects structured failure learning into the next autonomous prompt", async () => {
@@ -3427,6 +3497,191 @@ Review README.md twice.
     expect(firstPrompt).toContain("Previous autonomous-loop learning:")
     expect(firstPrompt).toContain("Last decision:")
     expect(firstPrompt).toContain("rejected")
+  })
+
+  test("retains bounded repeated failure evidence in latest learning after a later promotion", async () => {
+    const prompt = "Improve the autonomous review command while keeping typecheck green."
+    let mutationPrompts: string[] = []
+
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [
+        {
+          prompt,
+          completionCriteria: {
+            changedArtifacts: ["command:autonomous-review"],
+          },
+        },
+      ],
+    })
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await runAutonomousIteration({
+        repoRoot,
+        pluginFilePath,
+        runtimeContract,
+        verificationCommands: [["bun", "run", "typecheck"]],
+        evaluationScenarios: [],
+        executeCommand: async ({ command }) => {
+          const probeResult = runtimeContractProbeResult(command)
+
+          if (probeResult) {
+            return probeResult
+          }
+
+          if (command[0] === "opencode") {
+            await applyMutationTransaction({
+              pluginFilePath,
+              runtimeContract,
+              mutation: {
+                kind: "command",
+                name: "autonomous-review",
+                document: `---\ndescription: Autonomous review ${attempt + 1}\n---\n\nReview autonomously.\n`,
+              },
+            })
+
+            return {
+              stdout: `{"type":"step_start","sessionID":"session-recent-failure-${attempt + 1}"}\n`,
+              stderr: "",
+              exitCode: 0,
+            }
+          }
+
+          return {
+            stdout: "verification failed\n",
+            stderr: "expected 0 type errors but found 1",
+            exitCode: 1,
+          }
+        },
+      })
+
+      await configureAutonomousLoop({
+        pluginFilePath,
+        runtimeContract,
+        replaceObjectives: true,
+        objectives: [
+          {
+            prompt,
+            completionCriteria: {
+              changedArtifacts: ["command:autonomous-review"],
+            },
+          },
+        ],
+      })
+    }
+
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: "---\ndescription: Autonomous review promoted\n---\n\nReview autonomously.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-recent-success"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "ok\n",
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+    })
+
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [
+        {
+          prompt: "Tighten the autonomous review command behavior.",
+          completionCriteria: {
+            changedArtifacts: ["command:autonomous-review"],
+          },
+        },
+      ],
+    })
+
+    mutationPrompts = []
+
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          mutationPrompts.push(command.at(-1) ?? "")
+
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: "---\ndescription: Autonomous review final\n---\n\nReview autonomously.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-recent-follow-up"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "ok\n",
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(status.latestLearning?.lastDecision).toBe("promoted")
+    expect(status.latestLearning?.failedVerificationCommands).toContainEqual([
+      "bun",
+      "run",
+      "typecheck",
+    ])
+    expect(status.latestLearning?.changedArtifacts).toContain("command:autonomous-review")
+    expect(mutationPrompts[0]).toContain("Previous autonomous-loop learning:")
+    expect(mutationPrompts[0]).toContain("Failed verification commands: bun run typecheck")
   })
 
   test("omits empty structured failure sections from the prompt when learning has no failures", async () => {

@@ -68,6 +68,21 @@ const AUTONOMOUS_STARTUP_TURN_ONE_TOOLS = [
   "evolver_autonomous_status",
   "evolver_status",
 ] as const
+const AUTONOMOUS_PREVIEW_TURN_ONE_TOOLS = [
+  "evolver_autonomous_preview",
+  "evolver_autonomous_status",
+] as const
+const AUTONOMOUS_METRICS_TURN_ONE_TOOLS = [
+  "evolver_autonomous_metrics",
+  "evolver_autonomous_status",
+] as const
+const AUTONOMOUS_STOP_TURN_ONE_TOOLS = [
+  "evolver_autonomous_stop",
+  "evolver_autonomous_status",
+] as const
+const OBJECTIVE_MEMORY_EVIDENCE_ALLOWED_CHANGED_FILES: readonly string[] = [
+  ".opencode/oc-evolver/registry.json",
+]
 const OBJECTIVE_MEMORY_EVIDENCE_TOOLS = [
   "evolver_autonomous_status",
   "evolver_status",
@@ -113,6 +128,40 @@ const AUTONOMOUS_CONTROL_CONFIGURE_INPUT = {
 const AUTONOMOUS_RUN_OBJECTIVE_PROMPT =
   'Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.'
 const AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND = ["bun", "--version"]
+const AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT =
+  "Repair the autonomous review command while keeping typecheck green."
+const AUTONOMOUS_PREVIEW_OBJECTIVE_RATIONALE =
+  "Queued bounded objective for autonomous preview evaluation coverage."
+const AUTONOMOUS_PREVIEW_OBJECTIVE_VERIFICATION_COMMAND = ["bun", "--version"]
+const AUTONOMOUS_PREVIEW_CONFIGURED_VERIFICATION_COMMAND = ["bun", "run", "typecheck"]
+const AUTONOMOUS_PREVIEW_COMPLETION_CRITERIA = {
+  changedArtifacts: ["command:autonomous-review"],
+  evaluationScenarios: ["objective-proof"],
+  verificationCommands: [AUTONOMOUS_PREVIEW_OBJECTIVE_VERIFICATION_COMMAND],
+} as const
+const AUTONOMOUS_METRICS_SINCE = "2026-05-01T09:00:00.000Z"
+const AUTONOMOUS_METRICS_LATEST_COMPLETED_AT = "2026-05-01T09:00:10.000Z"
+const AUTONOMOUS_METRICS_EXPECTED = {
+  totalIterations: 4,
+  promotedCount: 1,
+  rejectedCount: 1,
+  rolledBackCount: 1,
+  skippedCount: 1,
+  mutationFailedCount: 0,
+  noPendingRevisionCount: 0,
+  promotionRate: 0.25,
+  avgIterationDurationMs: 2500,
+  lastIterationDurationMs: 4000,
+  objectivesCompleted: 0,
+  objectivesPending: 2,
+  objectivesQuarantined: 1,
+  latestIteration: {
+    startedAt: "2026-05-01T09:00:06.000Z",
+    completedAt: AUTONOMOUS_METRICS_LATEST_COMPLETED_AT,
+    decision: "rolled_back",
+  },
+  since: AUTONOMOUS_METRICS_SINCE,
+} as const
 const AUTONOMOUS_RUN_COMPLETION_CRITERIA = {
   changedArtifacts: ["memory:autonomous-evidence-memory"],
   evaluationScenarios: ["objective-memory-evidence"],
@@ -129,6 +178,7 @@ const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
   objectives: [
     {
       prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+      priority: 0,
       completionCriteria: AUTONOMOUS_RUN_COMPLETION_CRITERIA,
     },
   ],
@@ -481,6 +531,253 @@ async function seedScenarioWorkspace(scenarioName: string, workspaceRoot: string
       )
       return
     }
+    case "autonomous-preview": {
+      await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+      await writeFile(
+        join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+        JSON.stringify(
+          {
+            config: {
+              enabled: true,
+              paused: false,
+              intervalMs: 60_000,
+              verificationCommands: [AUTONOMOUS_PREVIEW_CONFIGURED_VERIFICATION_COMMAND],
+              evaluationScenarios: ["smoke"],
+              failurePolicy: {
+                maxConsecutiveFailures: 3,
+                escalationAction: "pause_loop",
+                lastEscalationReason: null,
+              },
+            },
+            lastSessionID: null,
+            latestLearning: null,
+            objectives: [
+              {
+                prompt: AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT,
+                priority: 1,
+                status: "pending",
+                source: "manual",
+                rationale: AUTONOMOUS_PREVIEW_OBJECTIVE_RATIONALE,
+                completionCriteria: AUTONOMOUS_PREVIEW_COMPLETION_CRITERIA,
+                lastCompletionEvidence: null,
+                attempts: 0,
+                consecutiveFailures: 0,
+                updatedAt: new Date(0).toISOString(),
+                lastSessionID: null,
+                lastDecision: null,
+                lastEscalationReason: null,
+              },
+            ],
+            iterations: [],
+          },
+          null,
+          2,
+        ),
+      )
+      return
+    }
+    case "autonomous-metrics": {
+      await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+      await writeFile(
+        join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+        JSON.stringify(
+          {
+            config: {
+              enabled: true,
+              paused: false,
+              intervalMs: 60_000,
+              verificationCommands: [["bun", "run", "typecheck"]],
+              evaluationScenarios: ["smoke"],
+              failurePolicy: {
+                maxConsecutiveFailures: 3,
+                escalationAction: "pause_loop",
+                lastEscalationReason: "post-promotion verification regressed",
+              },
+            },
+            lastSessionID: "ses-autonomous-metrics",
+            latestLearning: {
+              summary: "The last autonomous iteration rolled back after post-promotion verification regressed.",
+              changedArtifacts: ["command:autonomous-review"],
+              failedVerificationCommands: [["bun", "run", "typecheck"]],
+              failedEvaluationScenarios: ["objective-proof"],
+              lastDecision: "rolled_back",
+              remainingObjectives: ["Pending objective"],
+              lastEscalationReason: "post-promotion verification regressed",
+            },
+            objectives: [
+              {
+                prompt: "Completed objective",
+                priority: 1,
+                status: "completed",
+                source: "manual",
+                rationale: null,
+                completionCriteria: null,
+                lastCompletionEvidence: null,
+                attempts: 1,
+                consecutiveFailures: 0,
+                updatedAt: AUTONOMOUS_METRICS_LATEST_COMPLETED_AT,
+                lastSessionID: "ses-autonomous-metrics",
+                lastDecision: "promoted",
+                lastEscalationReason: null,
+              },
+              {
+                prompt: "Pending objective",
+                priority: 2,
+                status: "pending",
+                source: "health",
+                rationale: "Durable verification failures need follow-up.",
+                completionCriteria: {
+                  changedArtifacts: ["command:autonomous-review"],
+                },
+                lastCompletionEvidence: null,
+                attempts: 2,
+                consecutiveFailures: 2,
+                updatedAt: AUTONOMOUS_METRICS_LATEST_COMPLETED_AT,
+                lastSessionID: "ses-autonomous-metrics",
+                lastDecision: "rolled_back",
+                lastEscalationReason: "post-promotion verification regressed",
+              },
+              {
+                prompt: "Quarantined objective",
+                priority: 3,
+                status: "quarantined",
+                source: "repair",
+                rationale: "Repeated verification failures quarantined this objective.",
+                completionCriteria: {
+                  verificationCommands: [["bun", "run", "typecheck"]],
+                },
+                lastCompletionEvidence: null,
+                attempts: 3,
+                consecutiveFailures: 3,
+                updatedAt: AUTONOMOUS_METRICS_LATEST_COMPLETED_AT,
+                lastSessionID: "ses-autonomous-metrics",
+                lastDecision: "rejected",
+                lastEscalationReason: "too many consecutive failures",
+              },
+            ],
+            iterations: [
+              {
+                startedAt: AUTONOMOUS_METRICS_SINCE,
+                completedAt: "2026-05-01T09:00:01.000Z",
+                decision: "promoted",
+                sessionID: "ses-autonomous-metrics",
+                pendingRevisionID: "rev-promoted",
+                promotedRevisionID: "rev-promoted",
+                rejectionReason: null,
+                changedArtifacts: ["command:autonomous-review"],
+                verification: [
+                  {
+                    command: ["bun", "run", "typecheck"],
+                    exitCode: 0,
+                    stdout: "ok\n",
+                    stderr: "",
+                  },
+                ],
+                evaluations: [
+                  {
+                    scenarioName: "smoke",
+                    exitCode: 0,
+                    stdout: "ok\n",
+                    stderr: "",
+                    changedFiles: [],
+                  },
+                ],
+              },
+              {
+                startedAt: "2026-05-01T09:00:01.000Z",
+                completedAt: "2026-05-01T09:00:03.000Z",
+                decision: "rejected",
+                sessionID: "ses-autonomous-metrics",
+                pendingRevisionID: "rev-rejected",
+                promotedRevisionID: null,
+                rejectionReason: "verification failed",
+                changedArtifacts: ["command:autonomous-review"],
+                verification: [
+                  {
+                    command: ["bun", "run", "typecheck"],
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "typecheck failed\n",
+                  },
+                ],
+                evaluations: [],
+              },
+              {
+                startedAt: "2026-05-01T09:00:03.000Z",
+                completedAt: "2026-05-01T09:00:06.000Z",
+                decision: "skipped_unrunnable",
+                sessionID: "ses-autonomous-metrics",
+                pendingRevisionID: null,
+                promotedRevisionID: null,
+                rejectionReason: "no bounded objective available",
+                changedArtifacts: [],
+                verification: [],
+                evaluations: [],
+              },
+              {
+                startedAt: "2026-05-01T09:00:06.000Z",
+                completedAt: AUTONOMOUS_METRICS_LATEST_COMPLETED_AT,
+                decision: "rolled_back",
+                sessionID: "ses-autonomous-metrics",
+                pendingRevisionID: "rev-rolled-back",
+                promotedRevisionID: "rev-rolled-back",
+                rejectionReason: "post-promotion verification regressed",
+                changedArtifacts: ["command:autonomous-review"],
+                verification: [
+                  {
+                    command: ["bun", "run", "typecheck"],
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "typecheck failed\n",
+                  },
+                ],
+                evaluations: [
+                  {
+                    scenarioName: "objective-proof",
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "objective proof failed\n",
+                    changedFiles: [],
+                  },
+                ],
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+      )
+      return
+    }
+    case "autonomous-stop": {
+      await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+      await writeFile(
+        join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+        JSON.stringify(
+          {
+            config: {
+              enabled: true,
+              paused: false,
+              intervalMs: 60_000,
+              verificationCommands: [["bun", "run", "typecheck"]],
+              evaluationScenarios: ["smoke"],
+              failurePolicy: {
+                maxConsecutiveFailures: 3,
+                escalationAction: "pause_loop",
+                lastEscalationReason: null,
+              },
+            },
+            lastSessionID: "ses-autonomous-stop",
+            latestLearning: null,
+            objectives: [],
+            iterations: [],
+          },
+          null,
+          2,
+        ),
+      )
+      return
+    }
     default:
       return
   }
@@ -706,9 +1003,13 @@ async function assertScenarioArtifacts(input: {
         "scenario objective-memory-evidence executed a mutating tool",
       )
 
-      if (input.changedFiles.length > 0) {
+      const unexpectedChangedFiles = input.changedFiles.filter(
+        (relativePath) => !OBJECTIVE_MEMORY_EVIDENCE_ALLOWED_CHANGED_FILES.includes(relativePath),
+      )
+
+      if (unexpectedChangedFiles.length > 0) {
         throw new Error(
-          `scenario objective-memory-evidence created unexpected durable artifacts: ${input.changedFiles.join(", ")}`,
+          `scenario objective-memory-evidence created unexpected durable artifacts: ${unexpectedChangedFiles.join(", ")}`,
         )
       }
 
@@ -1427,6 +1728,294 @@ async function assertScenarioArtifacts(input: {
 
       if ((loopState.iterations ?? []).length !== 0) {
         throw new Error("scenario autonomous-startup unexpectedly recorded loop iterations")
+      }
+
+      return
+    }
+    case "autonomous-preview": {
+      if (input.turns.length !== 1) {
+        throw new Error(`scenario autonomous-preview expected exactly 1 turn, got ${input.turns.length}`)
+      }
+
+      const loopState = JSON.parse(
+        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"), "utf8"),
+      ) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+        }
+        objectives?: Array<{
+          prompt?: string
+          status?: string
+          source?: string
+          rationale?: string | null
+          completionCriteria?: {
+            changedArtifacts?: string[]
+            evaluationScenarios?: string[]
+            verificationCommands?: string[][]
+          } | null
+        }>
+        iterations?: unknown[]
+      }
+
+      const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+
+      assertExactToolSequence(
+        turnOneToolSequence,
+        AUTONOMOUS_PREVIEW_TURN_ONE_TOOLS,
+        "scenario autonomous-preview did not follow the required preview/status path",
+      )
+
+      assertNoExecutedTools(
+        new Set(turnOneToolSequence),
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario autonomous-preview executed an unexpected outer-session mutating tool",
+      )
+
+      const previewEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_preview")
+      const statusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const previewState = parseToolOutput(previewEvent?.output) as {
+        wouldRun?: boolean
+        wouldSkipReason?: string | null
+        selectedObjective?: string | null
+        selectedObjectiveSource?: string | null
+        selectedObjectiveRationale?: string | null
+        mutationPrompt?: string | null
+        verificationCommands?: string[][]
+        evaluationScenarios?: string[]
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+        }
+        lockHeld?: boolean
+        runtimeContractCompatible?: boolean
+        runtimeContractDetail?: string | null
+        pendingObjectives?: string[]
+      }
+      const statusState = parseToolOutput(statusEvent?.output) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+        }
+        objectives?: Array<{
+          prompt?: string
+          status?: string
+          source?: string
+          rationale?: string | null
+          completionCriteria?: {
+            changedArtifacts?: string[]
+            evaluationScenarios?: string[]
+            verificationCommands?: string[][]
+          } | null
+        }>
+        iterations?: unknown[]
+      }
+      const objective = loopState.objectives?.[0]
+
+      if (
+        previewState.wouldRun !== true ||
+        previewState.wouldSkipReason !== null ||
+        previewState.selectedObjective !== AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT ||
+        previewState.selectedObjectiveSource !== "manual" ||
+        previewState.selectedObjectiveRationale !== AUTONOMOUS_PREVIEW_OBJECTIVE_RATIONALE ||
+        !previewState.mutationPrompt?.includes(AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT) ||
+        JSON.stringify(previewState.verificationCommands ?? []) !==
+          JSON.stringify([
+            AUTONOMOUS_PREVIEW_CONFIGURED_VERIFICATION_COMMAND,
+            AUTONOMOUS_PREVIEW_OBJECTIVE_VERIFICATION_COMMAND,
+          ]) ||
+        JSON.stringify(previewState.evaluationScenarios ?? []) !==
+          JSON.stringify(["smoke", "objective-proof"]) ||
+        previewState.config?.enabled !== true ||
+        previewState.config?.paused !== false ||
+        previewState.config?.intervalMs !== 60_000 ||
+        previewState.lockHeld !== false ||
+        previewState.runtimeContractCompatible !== true ||
+        previewState.runtimeContractDetail !== null ||
+        JSON.stringify(previewState.pendingObjectives ?? []) !==
+          JSON.stringify([AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT])
+      ) {
+        throw new Error("scenario autonomous-preview preview output did not reflect the queued bounded objective")
+      }
+
+      if (
+        statusState.config?.enabled !== true ||
+        statusState.config?.paused !== false ||
+        statusState.config?.intervalMs !== 60_000 ||
+        JSON.stringify(statusState.config?.verificationCommands ?? []) !==
+          JSON.stringify([AUTONOMOUS_PREVIEW_CONFIGURED_VERIFICATION_COMMAND]) ||
+        JSON.stringify(statusState.config?.evaluationScenarios ?? []) !== JSON.stringify(["smoke"]) ||
+        statusState.objectives?.[0]?.prompt !== AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT ||
+        statusState.objectives?.[0]?.status !== "pending" ||
+        statusState.objectives?.[0]?.source !== "manual" ||
+        statusState.objectives?.[0]?.rationale !== AUTONOMOUS_PREVIEW_OBJECTIVE_RATIONALE ||
+        JSON.stringify(statusState.objectives?.[0]?.completionCriteria ?? null) !==
+          JSON.stringify(AUTONOMOUS_PREVIEW_COMPLETION_CRITERIA) ||
+        (statusState.iterations ?? []).length !== 0
+      ) {
+        throw new Error("scenario autonomous-preview status output did not reflect the queued bounded objective state")
+      }
+
+      if (
+        loopState.config?.enabled !== true ||
+        loopState.config?.paused !== false ||
+        loopState.config?.intervalMs !== 60_000 ||
+        JSON.stringify(loopState.config?.verificationCommands ?? []) !==
+          JSON.stringify([AUTONOMOUS_PREVIEW_CONFIGURED_VERIFICATION_COMMAND]) ||
+        JSON.stringify(loopState.config?.evaluationScenarios ?? []) !== JSON.stringify(["smoke"]) ||
+        objective?.prompt !== AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT ||
+        objective.status !== "pending" ||
+        objective.source !== "manual" ||
+        objective.rationale !== AUTONOMOUS_PREVIEW_OBJECTIVE_RATIONALE ||
+        JSON.stringify(objective.completionCriteria ?? null) !==
+          JSON.stringify(AUTONOMOUS_PREVIEW_COMPLETION_CRITERIA) ||
+        (loopState.iterations ?? []).length !== 0
+      ) {
+        throw new Error("scenario autonomous-preview persisted state did not remain a bounded queued objective")
+      }
+
+      return
+    }
+    case "autonomous-metrics": {
+      if (input.turns.length !== 1) {
+        throw new Error(`scenario autonomous-metrics expected exactly 1 turn, got ${input.turns.length}`)
+      }
+
+      const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+
+      assertExactToolSequence(
+        turnOneToolSequence,
+        AUTONOMOUS_METRICS_TURN_ONE_TOOLS,
+        "scenario autonomous-metrics did not follow the required metrics/status path",
+      )
+
+      assertNoExecutedTools(
+        new Set(turnOneToolSequence),
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario autonomous-metrics executed an unexpected outer-session mutating tool",
+      )
+
+      const metricsEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_metrics")
+      const statusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const metricsState = parseToolOutput(metricsEvent?.output)
+      const statusState = parseToolOutput(statusEvent?.output) as {
+        objectives?: Array<{ status?: string }>
+        iterations?: Array<{ decision?: string }>
+        latestLearning?: { lastDecision?: string | null } | null
+      }
+
+      if (!areJsonValuesEqual(metricsState, AUTONOMOUS_METRICS_EXPECTED)) {
+        throw new Error("scenario autonomous-metrics metrics output did not reflect the persisted loop history")
+      }
+
+      const objectiveStatuses = (statusState.objectives ?? []).map((objective) => objective.status)
+      const iterationDecisions = (statusState.iterations ?? []).map((iteration) => iteration.decision)
+
+      if (
+        JSON.stringify(objectiveStatuses) !== JSON.stringify(["quarantined", "pending", "pending"]) ||
+        JSON.stringify(iterationDecisions) !==
+          JSON.stringify(["promoted", "rejected", "skipped_unrunnable", "rolled_back"]) ||
+        statusState.latestLearning?.lastDecision !== "rolled_back"
+      ) {
+        throw new Error("scenario autonomous-metrics status output did not reflect the persisted objective and iteration history")
+      }
+
+      return
+    }
+    case "autonomous-stop": {
+      if (input.turns.length !== 1) {
+        throw new Error(`scenario autonomous-stop expected exactly 1 turn, got ${input.turns.length}`)
+      }
+
+      assertAuditAction(auditEvents, "autonomous_stop", "scenario autonomous-stop missing autonomous_stop audit event")
+
+      const loopState = JSON.parse(
+        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"), "utf8"),
+      ) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+        }
+        iterations?: unknown[]
+      }
+
+      const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+
+      assertExactToolSequence(
+        turnOneToolSequence,
+        AUTONOMOUS_STOP_TURN_ONE_TOOLS,
+        "scenario autonomous-stop did not follow the required stop/status path",
+      )
+
+      const stopEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_stop")
+      const statusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const stopState = parseToolOutput(stopEvent?.output) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+        }
+        activation?: {
+          mode?: string
+        }
+      }
+      const statusState = parseToolOutput(statusEvent?.output) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+        }
+        objectives?: unknown[]
+        iterations?: unknown[]
+      }
+
+      if (
+        stopState.config?.enabled !== false ||
+        stopState.config?.paused !== true ||
+        stopState.config?.intervalMs !== 60_000 ||
+        stopState.activation?.mode !== "stopped"
+      ) {
+        throw new Error("scenario autonomous-stop stop output did not reflect the stopped disabled state")
+      }
+
+      if (
+        statusState.config?.enabled !== false ||
+        statusState.config?.paused !== true ||
+        statusState.config?.intervalMs !== 60_000 ||
+        JSON.stringify(statusState.config?.verificationCommands ?? []) !==
+          JSON.stringify([["bun", "run", "typecheck"]]) ||
+        JSON.stringify(statusState.config?.evaluationScenarios ?? []) !== JSON.stringify(["smoke"]) ||
+        (statusState.objectives ?? []).length !== 0 ||
+        (statusState.iterations ?? []).length !== 0
+      ) {
+        throw new Error("scenario autonomous-stop status output did not reflect the stopped disabled state")
+      }
+
+      if (
+        loopState.config?.enabled !== false ||
+        loopState.config?.paused !== true ||
+        loopState.config?.intervalMs !== 60_000 ||
+        JSON.stringify(loopState.config?.verificationCommands ?? []) !==
+          JSON.stringify([["bun", "run", "typecheck"]]) ||
+        JSON.stringify(loopState.config?.evaluationScenarios ?? []) !== JSON.stringify(["smoke"]) ||
+        (loopState.iterations ?? []).length !== 0
+      ) {
+        throw new Error("scenario autonomous-stop did not persist the stopped disabled loop state")
       }
 
       return

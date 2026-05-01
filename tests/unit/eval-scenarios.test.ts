@@ -25,6 +25,7 @@ const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
   objectives: [
     {
       prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+      priority: 0,
       completionCriteria: {
         changedArtifacts: ["memory:autonomous-evidence-memory"],
         evaluationScenarios: ["objective-memory-evidence"],
@@ -36,6 +37,8 @@ const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
   enabled: true,
   paused: false,
 } as const
+const AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT =
+  "Repair the autonomous review command while keeping typecheck green."
 
 function buildToolEvent(tool: string, sessionID: string, input?: unknown, output?: unknown) {
   return JSON.stringify(
@@ -1643,6 +1646,53 @@ describe("evaluation scenarios", () => {
     ).rejects.toThrow(/status-only/i)
   })
 
+  test("objective-memory-evidence scenario allows the registry status artifact when the required status reads are the only tools used", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/objective-memory-evidence.md"),
+      await readFile(new URL("../../eval/scenarios/objective-memory-evidence.md", import.meta.url), "utf8"),
+    )
+
+    const result = await runEvaluationScenario({
+      repoRoot,
+      scenarioName: "objective-memory-evidence",
+      timestamp: "2026-05-02T00-15-00.000Z",
+      executeCommand: async ({ workspaceRoot }) => {
+        await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+        await writeFile(
+          join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+          JSON.stringify(
+            {
+              skills: {},
+              agents: {},
+              commands: {},
+              memories: {},
+              quarantine: {},
+              currentRevision: null,
+              pendingRevision: "rev-objective-allowed",
+            },
+            null,
+            2,
+          ),
+        )
+
+        return {
+          stdout: [
+            '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-allowed"}',
+            '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-allowed"}',
+          ].join("\n"),
+          stderr: "",
+          exitCode: 0,
+        } satisfies EvalCommandResult
+      },
+    })
+
+    const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
+      changedFiles: string[]
+    }
+
+    expect(resultJson.changedFiles).toEqual([".opencode/oc-evolver/registry.json"])
+  })
+
   test("objective-memory-evidence scenario rejects runs that add an unexpected second turn", async () => {
     const objectivePrompt = await readFile(
       new URL("../../eval/scenarios/objective-memory-evidence.md", import.meta.url),
@@ -3048,5 +3098,397 @@ describe("evaluation scenarios", () => {
         },
       }),
     ).rejects.toThrow(/status output|currentRevision|pendingRevision/i)
+  })
+
+  test("autonomous-preview scenario captures the bounded next-iteration preview without mutating the loop", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-preview.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-preview.md", import.meta.url), "utf8"),
+    )
+
+    const result = await runEvaluationScenario({
+      repoRoot,
+      scenarioName: "autonomous-preview",
+      timestamp: "2026-05-01T10-00-00.000Z",
+      executeCommand: async ({ workspaceRoot }) => {
+        const hooks = await createOCEvolverPlugin(undefined, {})({
+          client: {
+            session: {
+              prompt: async () => ({ info: {}, parts: [] }),
+            },
+          },
+          project: {
+            id: "eval-preview-project",
+            worktree: workspaceRoot,
+          },
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          experimental_workspace: {
+            register() {},
+          },
+          serverUrl: new URL("http://localhost:4096"),
+          $: {} as never,
+        } as never)
+        const tool = hooks.tool!
+
+        const previewOutput = await tool.evolver_autonomous_preview!.execute(
+          {},
+          { sessionID: "ses-autonomous-preview" } as never,
+        )
+        const statusOutput = await tool.evolver_autonomous_status!.execute(
+          {},
+          { sessionID: "ses-autonomous-preview" } as never,
+        )
+
+        return {
+          stdout: [
+            buildToolEvent(
+              "evolver_autonomous_preview",
+              "ses-autonomous-preview",
+              {},
+              previewOutput,
+            ),
+            buildToolEvent(
+              "evolver_autonomous_status",
+              "ses-autonomous-preview",
+              {},
+              statusOutput,
+            ),
+          ].join("\n"),
+          stderr: "",
+          exitCode: 0,
+        } satisfies EvalCommandResult
+      },
+    })
+
+    const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
+      changedFiles: string[]
+      turnCount: number
+    }
+
+    expect(resultJson.turnCount).toBe(1)
+    expect(resultJson.changedFiles).toEqual([".opencode/oc-evolver/autonomous-loop.json"])
+  })
+
+  test("autonomous-preview scenario rejects stale preview output even when status remains queued", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-preview.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-preview.md", import.meta.url), "utf8"),
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-preview",
+        timestamp: "2026-05-01T10-00-30.000Z",
+        executeCommand: async () => {
+          return {
+            stdout: [
+              buildToolEvent(
+                "evolver_autonomous_preview",
+                "ses-autonomous-preview-stale",
+                {},
+                JSON.stringify({
+                  wouldRun: false,
+                  wouldSkipReason: "no bounded objective available",
+                  selectedObjective: null,
+                  selectedObjectiveSource: null,
+                  selectedObjectiveRationale: null,
+                  mutationPrompt: null,
+                  verificationCommands: [],
+                  evaluationScenarios: [],
+                  config: {
+                    enabled: false,
+                    paused: true,
+                    intervalMs: 0,
+                  },
+                  lockHeld: false,
+                  runtimeContractCompatible: true,
+                  runtimeContractDetail: null,
+                  pendingObjectives: [],
+                }),
+              ),
+              buildToolEvent(
+                "evolver_autonomous_status",
+                "ses-autonomous-preview-stale",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 60_000,
+                    verificationCommands: [["bun", "run", "typecheck"]],
+                    evaluationScenarios: ["smoke"],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT,
+                      status: "pending",
+                    },
+                  ],
+                  iterations: [],
+                }),
+              ),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/preview output|selected objective|wouldRun/i)
+  })
+
+  test("autonomous-metrics scenario captures structured loop metrics without mutating history", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-metrics.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-metrics.md", import.meta.url), "utf8"),
+    )
+
+    const result = await runEvaluationScenario({
+      repoRoot,
+      scenarioName: "autonomous-metrics",
+      timestamp: "2026-05-01T10-01-00.000Z",
+      executeCommand: async ({ workspaceRoot }) => {
+        const hooks = await createOCEvolverPlugin(undefined, {})({
+          client: {
+            session: {
+              prompt: async () => ({ info: {}, parts: [] }),
+            },
+          },
+          project: {
+            id: "eval-metrics-project",
+            worktree: workspaceRoot,
+          },
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          experimental_workspace: {
+            register() {},
+          },
+          serverUrl: new URL("http://localhost:4096"),
+          $: {} as never,
+        } as never)
+        const tool = hooks.tool!
+
+        const metricsOutput = await tool.evolver_autonomous_metrics!.execute(
+          {},
+          { sessionID: "ses-autonomous-metrics" } as never,
+        )
+        const statusOutput = await tool.evolver_autonomous_status!.execute(
+          {},
+          { sessionID: "ses-autonomous-metrics" } as never,
+        )
+
+        return {
+          stdout: [
+            buildToolEvent(
+              "evolver_autonomous_metrics",
+              "ses-autonomous-metrics",
+              {},
+              metricsOutput,
+            ),
+            buildToolEvent(
+              "evolver_autonomous_status",
+              "ses-autonomous-metrics",
+              {},
+              statusOutput,
+            ),
+          ].join("\n"),
+          stderr: "",
+          exitCode: 0,
+        } satisfies EvalCommandResult
+      },
+    })
+
+    const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
+      changedFiles: string[]
+      turnCount: number
+    }
+
+    expect(resultJson.turnCount).toBe(1)
+    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/autonomous-loop.json")
+    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/registry.json")
+  })
+
+  test("autonomous-metrics scenario rejects stale aggregate counts", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-metrics.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-metrics.md", import.meta.url), "utf8"),
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-metrics",
+        timestamp: "2026-05-01T10-01-30.000Z",
+        executeCommand: async () => {
+          return {
+            stdout: [
+              buildToolEvent(
+                "evolver_autonomous_metrics",
+                "ses-autonomous-metrics-stale",
+                {},
+                JSON.stringify({
+                  totalIterations: 0,
+                  promotedCount: 0,
+                  rejectedCount: 0,
+                  rolledBackCount: 0,
+                  skippedCount: 0,
+                  mutationFailedCount: 0,
+                  noPendingRevisionCount: 0,
+                  promotionRate: 0,
+                  avgIterationDurationMs: 0,
+                  lastIterationDurationMs: null,
+                  objectivesCompleted: 0,
+                  objectivesPending: 0,
+                  objectivesQuarantined: 0,
+                  latestIteration: null,
+                  since: new Date(0).toISOString(),
+                }),
+              ),
+              buildToolEvent(
+                "evolver_autonomous_status",
+                "ses-autonomous-metrics-stale",
+                {},
+                JSON.stringify({
+                  objectives: [
+                    { prompt: "Completed objective", status: "completed" },
+                    { prompt: "Pending objective", status: "pending" },
+                    { prompt: "Quarantined objective", status: "quarantined" },
+                  ],
+                  iterations: [
+                    { decision: "promoted" },
+                    { decision: "rejected" },
+                    { decision: "skipped_unrunnable" },
+                    { decision: "rolled_back" },
+                  ],
+                }),
+              ),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/metrics output|totalIterations|promotionRate/i)
+  })
+
+  test("autonomous-stop scenario captures the disabled paused terminal state", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-stop.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-stop.md", import.meta.url), "utf8"),
+    )
+
+    const result = await runEvaluationScenario({
+      repoRoot,
+      scenarioName: "autonomous-stop",
+      timestamp: "2026-05-01T10-02-00.000Z",
+      executeCommand: async ({ workspaceRoot }) => {
+        const hooks = await createOCEvolverPlugin(undefined, {})({
+          client: {
+            session: {
+              prompt: async () => ({ info: {}, parts: [] }),
+            },
+          },
+          project: {
+            id: "eval-stop-project",
+            worktree: workspaceRoot,
+          },
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          experimental_workspace: {
+            register() {},
+          },
+          serverUrl: new URL("http://localhost:4096"),
+          $: {} as never,
+        } as never)
+        const tool = hooks.tool!
+
+        const stopOutput = await tool.evolver_autonomous_stop!.execute(
+          {},
+          { sessionID: "ses-autonomous-stop" } as never,
+        )
+        const statusOutput = await tool.evolver_autonomous_status!.execute(
+          {},
+          { sessionID: "ses-autonomous-stop" } as never,
+        )
+
+        return {
+          stdout: [
+            buildToolEvent("evolver_autonomous_stop", "ses-autonomous-stop", {}, stopOutput),
+            buildToolEvent(
+              "evolver_autonomous_status",
+              "ses-autonomous-stop",
+              {},
+              statusOutput,
+            ),
+          ].join("\n"),
+          stderr: "",
+          exitCode: 0,
+        } satisfies EvalCommandResult
+      },
+    })
+
+    const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
+      changedFiles: string[]
+      turnCount: number
+    }
+
+    expect(resultJson.turnCount).toBe(1)
+    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/autonomous-loop.json")
+    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/audit.ndjson")
+  })
+
+  test("autonomous-stop scenario rejects stale stopped-state output", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-stop.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-stop.md", import.meta.url), "utf8"),
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-stop",
+        timestamp: "2026-05-01T10-02-30.000Z",
+        executeCommand: async () => {
+          return {
+            stdout: [
+              buildToolEvent(
+                "evolver_autonomous_stop",
+                "ses-autonomous-stop-stale",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 60_000,
+                  },
+                  activation: {
+                    mode: "worker",
+                  },
+                }),
+              ),
+              buildToolEvent(
+                "evolver_autonomous_status",
+                "ses-autonomous-stop-stale",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 60_000,
+                    verificationCommands: [["bun", "run", "typecheck"]],
+                    evaluationScenarios: ["smoke"],
+                  },
+                  objectives: [],
+                  iterations: [],
+                }),
+              ),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/stopped|disabled|paused|autonomous_stop/i)
   })
 })

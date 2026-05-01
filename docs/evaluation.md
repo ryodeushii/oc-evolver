@@ -31,6 +31,9 @@ The runner currently executes these default scenarios:
 Additional targeted helper scenarios exist outside the default batch:
 
 - `objective-memory-evidence`
+- `autonomous-preview`
+- `autonomous-metrics`
+- `autonomous-stop`
 
 Pending revision lifecycle matters during evaluation: `evolver_write_*` tools stage a pending revision, while `evolver_promote` and `evolver_reject` decide whether that revision becomes the accepted registry state. `evolver_check` is the plugin-native health check for invalid artifacts plus pending revision state.
 
@@ -190,10 +193,49 @@ The scheduler's durable lock now stores acquisition metadata and only self-recov
 - Expected control-flow proof:
   - the scenario executes exactly one turn
   - it calls exactly `evolver_autonomous_status` and then `evolver_status`
-  - it does not call any other tools or leave durable file changes
+  - it does not call any other tools
 - Artifact note:
+  - a standalone status check may still leave `.opencode/oc-evolver/registry.json` as the only durable artifact
   - this scenario is exercised transitively by `autonomous-run`
   - standalone runs can still be captured under `eval/results/objective-memory-evidence/` when needed
+
+### `autonomous-preview`
+
+- Runs exactly one read-only bounded preview check for the next autonomous iteration
+- Expected control-flow proof:
+  - the scenario executes exactly one turn
+  - it calls exactly `evolver_autonomous_preview` and then `evolver_autonomous_status`
+  - it does not call any mutating outer-session tools
+- Expected artifact signal:
+  - seeded `.opencode/oc-evolver/autonomous-loop.json` remains enabled and unpaused
+  - preview output reports `wouldRun: true` for the queued bounded objective
+  - preview output includes the selected objective prompt, its `manual` source, its rationale, and the merged verification/evaluation gates
+  - status output still shows the same objective pending with no recorded iterations
+
+### `autonomous-metrics`
+
+- Runs exactly one read-only structured metrics check against persisted autonomous history
+- Expected control-flow proof:
+  - the scenario executes exactly one turn
+  - it calls exactly `evolver_autonomous_metrics` and then `evolver_autonomous_status`
+  - it does not call any mutating outer-session tools
+- Expected artifact signal:
+  - seeded `.opencode/oc-evolver/autonomous-loop.json` contains the persisted loop history
+  - metrics output reports the expected iteration counts, promotion rate, duration summaries, and objective status counts
+  - status output agrees on the derived quarantined/pending/pending objective mix and the promoted/rejected/skipped/rolled-back history
+
+### `autonomous-stop`
+
+- Runs exactly one stop-state control-plane check for a persisted scheduled autonomous loop
+- Expected control-flow proof:
+  - the scenario executes exactly one turn
+  - it calls exactly `evolver_autonomous_stop` and then `evolver_autonomous_status`
+  - it does not call any other tools
+- Expected artifact signal:
+  - `audit.ndjson` contains `autonomous_stop`
+  - `.opencode/oc-evolver/autonomous-loop.json` ends disabled and paused with the original schedule and gates preserved
+  - stop output reports `activation.mode: "stopped"`
+  - status output reports the same disabled paused state with no recorded iterations
 
 ### `rollback`
 
