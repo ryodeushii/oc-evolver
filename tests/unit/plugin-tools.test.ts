@@ -95,6 +95,7 @@ describe("plugin tool surface", () => {
       "evolver_autonomous_run",
       "evolver_autonomous_start",
       "evolver_autonomous_status",
+      "evolver_autonomous_stop",
       "evolver_check",
       "evolver_delete_artifact",
       "evolver_promote",

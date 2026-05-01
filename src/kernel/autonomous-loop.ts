@@ -318,6 +318,32 @@ export async function setAutonomousLoopPaused(input: {
   })
 }
 
+export async function stopAutonomousLoop(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+}) {
+  const result = await configureAutonomousLoop({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    enabled: false,
+    paused: true,
+  })
+
+  const worker = activeAutonomousLoopWorkers.get(input.pluginFilePath)
+
+  if (worker) {
+    activeAutonomousLoopWorkers.delete(input.pluginFilePath)
+    await worker.worker.terminate()
+  }
+
+  return {
+    ...result,
+    activation: {
+      mode: "stopped",
+    },
+  }
+}
+
 export async function setAutonomousLoopEnabled(input: {
   pluginFilePath: string
   runtimeContract: OCEvolverRuntimeContract

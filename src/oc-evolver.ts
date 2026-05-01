@@ -23,6 +23,7 @@ import {
   getAutonomousLoopStatus,
   runAutonomousIteration,
   setAutonomousLoopPaused,
+  stopAutonomousLoop,
 } from "./kernel/autonomous-loop.ts"
 import { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 import {
@@ -613,6 +614,29 @@ export function createOCEvolverPlugin(
                 status: "success",
                 target: ".opencode/oc-evolver/autonomous-loop.json",
                 detail: "resumed autonomous loop",
+              },
+            })
+
+            return JSON.stringify(result, null, 2)
+          },
+        }),
+        evolver_autonomous_stop: tool({
+          description: "Hard-stop the autonomous loop, terminating the worker and disabling the loop",
+          args: {},
+          async execute() {
+            const result = await stopAutonomousLoop({
+              pluginFilePath,
+              runtimeContract,
+            })
+
+            await appendAuditEvent({
+              pluginFilePath,
+              runtimeContract,
+              event: {
+                action: "autonomous_stop",
+                status: "success",
+                target: ".opencode/oc-evolver/autonomous-loop.json",
+                detail: "stopped autonomous loop",
               },
             })
 

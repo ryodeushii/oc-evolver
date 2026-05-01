@@ -26,6 +26,7 @@ export type AuditEvent = {
     | "rollback"
     | "autonomous_pause"
     | "autonomous_resume"
+    | "autonomous_stop"
     | "autonomous_restore"
     | "policy_denied"
   status: "success" | "failure"
