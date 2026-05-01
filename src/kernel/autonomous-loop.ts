@@ -100,6 +100,7 @@ type AutonomousLoopEvaluationRecord = {
 
 type AutonomousLoopObjective = {
   prompt: string
+  priority: number
   status: "pending" | "completed" | "quarantined"
   completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
   lastCompletionEvidence: AutonomousLoopObjectiveCompletionEvidence | null
@@ -217,6 +218,7 @@ type ActiveAutonomousLoopWorker = {
 
 type AutonomousLoopObjectiveInput = {
   prompt: string
+  priority?: number
   completionCriteria?: AutonomousLoopObjectiveCompletionCriteria | null
 }
 
@@ -1809,6 +1811,7 @@ function normalizeAutonomousLoopState(
 
         return {
           prompt: objective.prompt,
+          priority: typeof objective.priority === "number" ? objective.priority : 0,
           status,
           completionCriteria,
           lastCompletionEvidence,
@@ -2002,6 +2005,7 @@ function mergeObjectives(input: {
     for (const objective of input.existing) {
       nextInputs.set(objective.prompt, {
         prompt: objective.prompt,
+        priority: objective.priority,
         completionCriteria: objective.completionCriteria,
       })
     }
@@ -2025,6 +2029,7 @@ function mergeObjectives(input: {
 
     return {
       prompt: objectiveInput.prompt,
+      priority: objectiveInput.priority ?? existing?.priority ?? 0,
       status:
         existing?.status === "completed" && !input.replaceObjectives && !criteriaChanged
           ? ("completed" as const)
@@ -2075,7 +2080,10 @@ function selectObjectivePrompt(state: PersistedAutonomousLoopState, overrideProm
     return overridePrompt.trim()
   }
 
-  return state.objectives.find((objective) => objective.status === "pending")?.prompt ?? null
+  const pending = state.objectives.filter((objective) => objective.status === "pending")
+  pending.sort((a, b) => b.priority - a.priority)
+
+  return pending[0]?.prompt ?? null
 }
 
 function collectObjectiveEvaluationScenarios(
@@ -2182,6 +2190,7 @@ function deriveFollowUpObjectiveFromIteration(input: {
       rejectionReason: input.iteration.rejectionReason,
       completionCriteria,
     }),
+    priority: 0,
     status: "pending",
     completionCriteria,
     lastCompletionEvidence: null,

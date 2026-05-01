@@ -516,6 +516,7 @@ export function createOCEvolverPlugin(
             objectives: tool.schema.array(
               tool.schema.object({
                 prompt: tool.schema.string(),
+                priority: tool.schema.number().optional(),
                 completionCriteria: tool.schema.object({
                   changedArtifacts: tool.schema.array(tool.schema.string()).optional(),
                   evaluationScenarios: tool.schema.array(tool.schema.string()).optional(),
