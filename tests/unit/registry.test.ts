@@ -7,6 +7,7 @@ import runtimeContract from "../../eval/runtime-contract.json"
 import {
   applyMutationTransaction,
   deleteRegistryArtifact,
+  getPendingRevisionReview,
   loadRegistry,
   promotePendingRevision,
   pruneRegistryRevisions,
@@ -237,6 +238,106 @@ Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance
       status: "success",
       revisionID: result.revisionID,
       target: ".opencode/memory/project-preferences.md",
+    })
+  })
+
+  test("reads pending revision review details without mutating registry state", async () => {
+    const first = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "review-markdown",
+        document: `---
+description: First review flow
+---
+
+Review README.md.
+`,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    const second = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "review-markdown",
+        document: `---
+description: Second review flow
+---
+
+Review README.md twice.
+`,
+      },
+    })
+
+    const review = await getPendingRevisionReview(pluginFilePath, runtimeContract)
+
+    expect(review).toMatchObject({
+      currentRevisionID: first.revisionID,
+      pendingRevisionID: second.revisionID,
+      changedArtifacts: {
+        commands: ["review-markdown"],
+      },
+      pending: {
+        commands: {
+          "review-markdown": {
+            document: expect.stringContaining("Second review flow"),
+          },
+        },
+      },
+      current: {
+        commands: {
+          "review-markdown": {
+            document: expect.stringContaining("First review flow"),
+          },
+        },
+      },
+    })
+    expect((await loadRegistry(pluginFilePath, runtimeContract))).toMatchObject({
+      currentRevision: first.revisionID,
+      pendingRevision: second.revisionID,
+    })
+  })
+
+  test("returns an empty changed-artifact summary when no pending revision exists", async () => {
+    const first = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "review-markdown",
+        document: `---
+description: First review flow
+---
+
+Review README.md.
+`,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    const review = await getPendingRevisionReview(pluginFilePath, runtimeContract)
+
+    expect(review).toMatchObject({
+      currentRevisionID: first.revisionID,
+      pendingRevisionID: null,
+      changedArtifacts: {
+        skills: [],
+        agents: [],
+        commands: [],
+        memories: [],
+      },
+      current: {
+        commands: {
+          "review-markdown": {
+            document: expect.stringContaining("First review flow"),
+          },
+        },
+      },
+      pending: null,
     })
   })
 

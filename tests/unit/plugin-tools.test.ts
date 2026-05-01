@@ -72,6 +72,7 @@ describe("plugin tool surface", () => {
       "evolver_promote",
       "evolver_prune",
       "evolver_reject",
+      "evolver_review_pending",
       "evolver_rollback",
       "evolver_run_agent",
       "evolver_run_command",
@@ -85,6 +86,61 @@ describe("plugin tool surface", () => {
 
     expect(hooks.tool?.evolver_apply_memory?.description).toContain("memory profile")
     expect(hooks.tool?.evolver_rollback?.description).toContain("Rollback")
+  })
+
+  test("evolver_review_pending returns pending revision review details", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool.evolver_write_command.execute({
+      commandName: "review-markdown",
+      document: `---
+description: First review flow
+---
+
+Review README.md.
+`,
+    })
+    await hooks.tool.evolver_promote.execute({})
+    await hooks.tool.evolver_write_command.execute({
+      commandName: "review-markdown",
+      document: `---
+description: Second review flow
+---
+
+Review README.md twice.
+`,
+    })
+
+    const review = JSON.parse(await hooks.tool.evolver_review_pending.execute({})) as {
+      currentRevisionID: string | null
+      pendingRevisionID: string | null
+      changedArtifacts: { commands: string[] }
+      pending: { commands: Record<string, { document: string }> }
+      current: { commands: Record<string, { document: string }> }
+    }
+
+    expect(review.currentRevisionID).toBeString()
+    expect(review.pendingRevisionID).toBeString()
+    expect(review.changedArtifacts.commands).toEqual(["review-markdown"])
+    expect(review.pending.commands["review-markdown"]?.document).toContain("Second review flow")
+    expect(review.current.commands["review-markdown"]?.document).toContain("First review flow")
   })
 
   test("autonomous start and resume activate the loop instead of only flipping persisted state", async () => {

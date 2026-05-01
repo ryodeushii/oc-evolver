@@ -88,6 +88,35 @@ type RevisionEntries = {
   memories: Record<string, TextRevisionEntry>
 }
 
+type RegistryReviewEntry = {
+  document: string
+  contentHash: string
+}
+
+type RegistryReviewSkillEntry = RegistryReviewEntry & {
+  helperFiles: SkillBundleFileInput[]
+}
+
+type RegistryReviewEntries = {
+  skills: Record<string, RegistryReviewSkillEntry>
+  agents: Record<string, RegistryReviewEntry>
+  commands: Record<string, RegistryReviewEntry>
+  memories: Record<string, RegistryReviewEntry>
+}
+
+export type PendingRevisionReview = {
+  currentRevisionID: string | null
+  pendingRevisionID: string | null
+  changedArtifacts: {
+    skills: string[]
+    agents: string[]
+    commands: string[]
+    memories: string[]
+  }
+  current: RegistryReviewEntries | null
+  pending: RegistryReviewEntries | null
+}
+
 type RevisionRecord = {
   revisionID: string
   previousRevisionID: string | null
@@ -669,6 +698,32 @@ export async function pruneRegistryRevisions(input: {
   }
 }
 
+export async function getPendingRevisionReview(
+  pluginFilePath: string,
+  runtimeContract: OCEvolverRuntimeContract,
+): Promise<PendingRevisionReview> {
+  const registry = await loadRegistry(pluginFilePath, runtimeContract)
+  const currentRevision = registry.currentRevision
+    ? await loadRevision(pluginFilePath, runtimeContract, registry.currentRevision)
+    : null
+  const pendingRevision = registry.pendingRevision
+    ? await loadRevision(pluginFilePath, runtimeContract, registry.pendingRevision)
+    : null
+
+  return {
+    currentRevisionID: currentRevision?.revisionID ?? null,
+    pendingRevisionID: pendingRevision?.revisionID ?? null,
+    changedArtifacts: pendingRevision
+      ? diffRevisionEntries(
+          currentRevision?.entries ?? emptyRevisionEntries(),
+          pendingRevision.entries,
+        )
+      : emptyChangedArtifacts(),
+    current: currentRevision ? toRegistryReviewEntries(currentRevision.entries) : null,
+    pending: pendingRevision ? toRegistryReviewEntries(pendingRevision.entries) : null,
+  }
+}
+
 async function materializeMutation(input: {
   pluginFilePath: string
   runtimeContract: OCEvolverRuntimeContract
@@ -1152,6 +1207,44 @@ function normalizeRevisionEntries(entries: Partial<RevisionEntries> | undefined)
     agents: entries?.agents ?? {},
     commands: entries?.commands ?? {},
     memories: entries?.memories ?? {},
+  }
+}
+
+function toRegistryReviewEntries(entries: RevisionEntries): RegistryReviewEntries {
+  return {
+    skills: structuredClone(entries.skills),
+    agents: structuredClone(entries.agents),
+    commands: structuredClone(entries.commands),
+    memories: structuredClone(entries.memories),
+  }
+}
+
+function diffRevisionEntries(current: RevisionEntries, pending: RevisionEntries) {
+  return {
+    skills: diffRevisionEntryNames(current.skills, pending.skills),
+    agents: diffRevisionEntryNames(current.agents, pending.agents),
+    commands: diffRevisionEntryNames(current.commands, pending.commands),
+    memories: diffRevisionEntryNames(current.memories, pending.memories),
+  }
+}
+
+function diffRevisionEntryNames(
+  currentEntries: Record<string, { contentHash: string }>,
+  pendingEntries: Record<string, { contentHash: string }>,
+) {
+  const names = new Set([...Object.keys(currentEntries), ...Object.keys(pendingEntries)])
+
+  return [...names]
+    .filter((name) => currentEntries[name]?.contentHash !== pendingEntries[name]?.contentHash)
+    .sort((left, right) => left.localeCompare(right))
+}
+
+function emptyChangedArtifacts() {
+  return {
+    skills: [],
+    agents: [],
+    commands: [],
+    memories: [],
   }
 }
 

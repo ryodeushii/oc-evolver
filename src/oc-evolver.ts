@@ -29,6 +29,7 @@ import {
   applyMutationTransaction,
   deleteRegistryArtifact,
   ensureKernelRuntimePaths,
+  getPendingRevisionReview,
   loadRegistry,
   promotePendingRevision,
   pruneRegistryRevisions,
@@ -707,6 +708,17 @@ export function createOCEvolverPlugin(
                 kind: args.kind,
                 name: args.name,
               }),
+              null,
+              2,
+            )
+          },
+        }),
+        evolver_review_pending: tool({
+          description: "Show pending revision review details",
+          args: {},
+          async execute() {
+            return JSON.stringify(
+              await getPendingRevisionReview(pluginFilePath, runtimeContract),
               null,
               2,
             )

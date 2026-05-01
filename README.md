@@ -63,6 +63,7 @@ The plugin exposes this stable v1 tool surface:
 
 - `evolver_status`
 - `evolver_check`
+- `evolver_review_pending`
 - `evolver_validate`
 - `evolver_write_skill`
 - `evolver_write_agent`
@@ -85,6 +86,8 @@ The plugin exposes this stable v1 tool surface:
 - `evolver_rollback`
 
 Mutable writes now land as pending revisions. In the interactive/operator flow, use `evolver_check` to see whether the registry is clean and whether a pending revision is still awaiting review, then use `evolver_promote` or `evolver_reject` to explicitly accept or discard that pending state.
+
+Use `evolver_review_pending` when you need the actual pending-vs-current revision contents and a grouped artifact-change summary before promoting or rejecting a staged revision.
 
 The autonomous loop now has plugin-native control-plane tools. `evolver_autonomous_configure` persists queued objectives, verification commands, eval scenarios, schedule state, and a failure policy under the active OpenCode config root's `oc-evolver/autonomous-loop.json` (for example `.opencode/oc-evolver/autonomous-loop.json` in repo-backed/eval fixtures). The failure policy tracks consecutive objective failures and can either auto-pause the loop or quarantine the repeatedly failing objective after the configured threshold. `pause_loop` leaves `config.paused=true`, and subsequent runs surface `skipped_paused` until `evolver_autonomous_resume` clears that state. `quarantine_objective` changes the objective status to `quarantined`, which removes it from normal objective selection while leaving its escalation reason visible in status. Rejected or rolled-back ad-hoc iterations now also synthesize a deterministic follow-up objective when the loop has enough evidence to do so, reusing the recorded changed artifacts and failed verification/evaluation gates instead of relying on manual queue reconfiguration. `evolver_autonomous_start`, `evolver_autonomous_pause`, and `evolver_autonomous_resume` control scheduled workers through that persisted state, while `evolver_autonomous_run` executes one iteration immediately and `evolver_autonomous_status` reports the queue, latest learning, the most recent escalation reason, and recent iteration artifacts.
 
