@@ -772,6 +772,28 @@ export function createOCEvolverPlugin(
       },
       config: async () => {
         await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
+
+        const autonomousStatus = await getAutonomousLoopStatus({
+          pluginFilePath,
+          runtimeContract,
+        })
+
+        if (
+          autonomousStatus.config.enabled &&
+          !autonomousStatus.config.paused &&
+          autonomousStatus.config.intervalMs > 0
+        ) {
+          await (dependencies.activateAutonomousLoop ?? activateAutonomousLoop)(
+            {
+              repoRoot: autonomousRepoRoot,
+              pluginFilePath,
+              runtimeContract,
+            },
+            {
+              runEvaluationScenario: runLoopEvaluationScenario,
+            },
+          )
+        }
       },
       "permission.ask": async (permission, output) => {
         const runtimePolicy = permission.sessionID

@@ -976,6 +976,90 @@ Review README.md twice.
     })
   })
 
+  test("reactivates a persisted scheduled autonomous loop during config", async () => {
+    const activationCalls: Array<Record<string, unknown>> = []
+    const pluginModule = await import("../../src/oc-evolver.ts")
+
+    await writeFile(
+      join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+      `${JSON.stringify(
+        {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 60_000,
+            verificationCommands: [["bun", "run", "typecheck"]],
+            evaluationScenarios: ["autonomous-run"],
+            failurePolicy: {
+              maxConsecutiveFailures: 3,
+              escalationAction: "pause_loop",
+              lastEscalationReason: null,
+            },
+          },
+          lastSessionID: null,
+          latestLearning: null,
+          objectives: [],
+          iterations: [],
+        },
+        null,
+        2,
+      )}\n`,
+    )
+
+    const hooks = await (pluginModule.createOCEvolverPlugin as any)(undefined, {
+      activateAutonomousLoop: async (input: Record<string, unknown>) => {
+        activationCalls.push(input)
+
+        return {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 60_000,
+            verificationCommands: [["bun", "run", "typecheck"]],
+            evaluationScenarios: ["autonomous-run"],
+            failurePolicy: {
+              maxConsecutiveFailures: 3,
+              escalationAction: "pause_loop",
+              lastEscalationReason: null,
+            },
+          },
+          lastSessionID: null,
+          latestLearning: null,
+          objectives: [],
+          iterations: [],
+          activation: {
+            mode: "worker",
+          },
+          iteration: null,
+        }
+      },
+    })({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.config?.({} as never)
+
+    expect(activationCalls).toHaveLength(1)
+    expect(activationCalls[0]).toMatchObject({
+      repoRoot: workspaceRoot,
+    })
+  })
+
   test("uses the global runtime roots in an oc-evolver development workspace", async () => {
     const globalConfigHome = join(workspaceRoot, "xdg-config")
     const globalOpencodeRoot = join(globalConfigHome, "opencode")
