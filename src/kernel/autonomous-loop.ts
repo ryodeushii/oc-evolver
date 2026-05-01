@@ -167,6 +167,10 @@ type RunEvaluationScenario = (input: {
   scenarioName: string
 }) => Promise<EvaluationScenarioResult>
 
+type AutonomousLoopLockMetadata = {
+  acquiredAt: string
+}
+
 export type RunAutonomousIterationInput = {
   repoRoot: string
   pluginFilePath: string
@@ -233,6 +237,8 @@ const DEFAULT_AUTONOMOUS_LOOP_FAILURE_POLICY: AutonomousLoopFailurePolicy = {
 const DEFAULT_AUTONOMOUS_LOOP_PROMPT =
   "Review the current project state, make one concrete improvement, and leave the workspace in a verified state."
 const MAX_AUTONOMOUS_LOOP_REPAIR_ATTEMPTS = 1
+const MAX_AUTONOMOUS_LOOP_LOCK_AGE_MS = 60 * 60 * 1000
+const AUTONOMOUS_LOOP_LOCK_METADATA_FILE = "metadata.json"
 const MAX_ITERATION_HISTORY = 20
 const activeAutonomousLoopWorkers = new Map<string, ActiveAutonomousLoopWorker>()
 
@@ -459,34 +465,30 @@ export async function runAutonomousIteration(
 
   const lockPath = resolveAutonomousLoopLockPath(input.pluginFilePath, input.runtimeContract)
 
-  try {
-    await mkdir(lockPath)
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-      const state = await loadAutonomousLoopState(input.pluginFilePath, input.runtimeContract)
+  const lockAcquisition = await acquireAutonomousLoopLock(lockPath)
 
-      return await finalizeAutonomousIteration({
-        pluginFilePath: input.pluginFilePath,
-        runtimeContract: input.runtimeContract,
-        state,
-        iteration: {
-          startedAt: new Date().toISOString(),
-          completedAt: new Date().toISOString(),
-          sessionID: null,
-          decision: "skipped_locked",
-          pendingRevisionID: null,
-          promotedRevisionID: null,
-          rejectionReason: `autonomous loop skipped: lock already held at ${lockPath}`,
-          prompt: input.prompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
-          objectivePrompt: null,
-          verification: [],
-          evaluations: [],
-          changedArtifacts: [],
-        },
-      })
-    }
+  if (!lockAcquisition.acquired) {
+    const state = await loadAutonomousLoopState(input.pluginFilePath, input.runtimeContract)
 
-    throw error
+    return await finalizeAutonomousIteration({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      state,
+      iteration: {
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        sessionID: null,
+        decision: "skipped_locked",
+        pendingRevisionID: null,
+        promotedRevisionID: null,
+        rejectionReason: lockAcquisition.reason,
+        prompt: input.prompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
+        objectivePrompt: null,
+        verification: [],
+        evaluations: [],
+        changedArtifacts: [],
+      },
+    })
   }
 
   try {
@@ -908,6 +910,10 @@ export function resolveAutonomousLoopLockPath(
   return join(kernelPaths.registryRoot, "autonomous-loop.lock")
 }
 
+function resolveAutonomousLoopLockMetadataPath(lockPath: string) {
+  return join(lockPath, AUTONOMOUS_LOOP_LOCK_METADATA_FILE)
+}
+
 export function resolveAutonomousLoopSchedulePolicy(input: {
   workerRequested: boolean
   intervalMs: number
@@ -1184,6 +1190,114 @@ async function persistAutonomousLoopState(input: {
 
   await mkdir(dirname(statePath), { recursive: true })
   await writeFile(statePath, `${JSON.stringify(input.state, null, 2)}\n`)
+}
+
+async function acquireAutonomousLoopLock(lockPath: string) {
+  const now = new Date().toISOString()
+
+  try {
+    await createAutonomousLoopLock(lockPath, now)
+
+    return {
+      acquired: true as const,
+    }
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") {
+      throw error
+    }
+  }
+
+  if (!(await isAutonomousLoopLockStale(lockPath, now))) {
+    return {
+      acquired: false as const,
+      reason: `autonomous loop skipped: lock already held at ${lockPath}`,
+    }
+  }
+
+  await rm(lockPath, { recursive: true, force: true })
+
+  try {
+    await createAutonomousLoopLock(lockPath, now)
+
+    return {
+      acquired: true as const,
+    }
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+      return {
+        acquired: false as const,
+        reason: `autonomous loop skipped: lock already held at ${lockPath}`,
+      }
+    }
+
+    throw error
+  }
+}
+
+async function createAutonomousLoopLock(lockPath: string, acquiredAt: string) {
+  await mkdir(lockPath)
+
+  try {
+    await writeAutonomousLoopLockMetadata(lockPath, { acquiredAt })
+  } catch (error) {
+    await rm(lockPath, { recursive: true, force: true })
+    throw error
+  }
+}
+
+async function writeAutonomousLoopLockMetadata(
+  lockPath: string,
+  metadata: AutonomousLoopLockMetadata,
+) {
+  await writeFile(
+    resolveAutonomousLoopLockMetadataPath(lockPath),
+    `${JSON.stringify(metadata, null, 2)}\n`,
+  )
+}
+
+async function isAutonomousLoopLockStale(lockPath: string, now: string) {
+  const metadata = await readAutonomousLoopLockMetadata(lockPath)
+
+  if (!metadata) {
+    return false
+  }
+
+  const acquiredAt = Date.parse(metadata.acquiredAt)
+  const nowMs = Date.parse(now)
+
+  if (Number.isNaN(acquiredAt) || Number.isNaN(nowMs)) {
+    return false
+  }
+
+  return nowMs - acquiredAt > MAX_AUTONOMOUS_LOOP_LOCK_AGE_MS
+}
+
+async function readAutonomousLoopLockMetadata(
+  lockPath: string,
+): Promise<AutonomousLoopLockMetadata | null> {
+  try {
+    const rawMetadata = JSON.parse(
+      await readFile(resolveAutonomousLoopLockMetadataPath(lockPath), "utf8"),
+    ) as Partial<AutonomousLoopLockMetadata>
+
+    if (typeof rawMetadata.acquiredAt !== "string") {
+      return null
+    }
+
+    return {
+      acquiredAt: rawMetadata.acquiredAt,
+    }
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return null
+    }
+
+    if (error instanceof SyntaxError) {
+      return null
+    }
+
+    throw error
+  }
 }
 
 async function finalizeAutonomousIteration(input: {

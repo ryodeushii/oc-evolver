@@ -2239,6 +2239,64 @@ describe("autonomous loop", () => {
     expect(result.rejectionReason).toContain("lock")
   })
 
+  test("reclaims a stale loop lock before starting a new iteration", async () => {
+    const lockPath = resolveAutonomousLoopLockPath(pluginFilePath, runtimeContract)
+    await mkdir(lockPath, { recursive: true })
+    await writeFile(
+      join(lockPath, "metadata.json"),
+      `${JSON.stringify({
+        acquiredAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      }, null, 2)}\n`,
+    )
+
+    const result = await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      prompt: "Recover a stale loop lock and improve the loop.",
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: `---
+description: Review loop state after stale lock recovery
+---
+
+Inspect the autonomous loop state after stale lock recovery.
+`,
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-stale-lock"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+    })
+
+    expect(result.decision).toBe("promoted")
+    expect(result.sessionID).toBe("session-stale-lock")
+  })
+
   test("rolls back a promoted revision when post-promotion verification regresses an accepted state", async () => {
     const first = await applyMutationTransaction({
       pluginFilePath,

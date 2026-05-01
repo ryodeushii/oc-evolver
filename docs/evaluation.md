@@ -133,6 +133,8 @@ Key files:
 
 Rejected or rolled-back ad-hoc iterations now leave behind a deterministic queued follow-up objective when the loop has explicit failure evidence to reuse. The synthesized objective reuses the failed iteration's changed artifacts plus failed verification commands and evaluation scenarios as explicit completion criteria, so later runs can continue from recorded evidence without manual queue edits.
 
+The scheduler's durable lock now stores acquisition metadata and only self-recovers when that metadata proves the lock is stale. A fresh lock still produces `skipped_locked`, which keeps overlapping autonomous runs from deleting an active guard just to make progress.
+
 ### `objective-memory-evidence`
 
 - Runs exactly one nested objective-evaluation turn as a status-only proof helper for `autonomous-run`
