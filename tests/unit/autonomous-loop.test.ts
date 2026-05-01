@@ -499,7 +499,7 @@ describe("autonomous loop", () => {
         }
 
         if (command[0] === "opencode") {
-          await applyMutationTransaction({
+          const nextRevision = await applyMutationTransaction({
             pluginFilePath,
             runtimeContract,
             mutation: {
@@ -574,7 +574,7 @@ describe("autonomous loop", () => {
         }
 
         if (command[0] === "opencode") {
-          await applyMutationTransaction({
+          const nextRevision = await applyMutationTransaction({
             pluginFilePath,
             runtimeContract,
             mutation: {
@@ -630,6 +630,8 @@ describe("autonomous loop", () => {
   })
 
   test("marks an objective completed when its required verification command passes", async () => {
+    const objectiveVerificationCommand = ["bun", "test", "tests/unit/validate.test.ts"]
+
     await configureAutonomousLoop({
       pluginFilePath,
       runtimeContract,
@@ -639,19 +641,22 @@ describe("autonomous loop", () => {
         {
           prompt: "Complete once typecheck passes during the autonomous iteration.",
           completionCriteria: {
-            verificationCommands: [["bun", "run", "typecheck"]],
+            verificationCommands: [objectiveVerificationCommand],
           },
         },
       ],
     })
 
+    const executedCommands: string[][] = []
+
     await runAutonomousIteration({
       repoRoot,
       pluginFilePath,
       runtimeContract,
-      verificationCommands: [["bun", "run", "typecheck"]],
       evaluationScenarios: [],
       executeCommand: async ({ command }) => {
+        executedCommands.push(command)
+
         const probeResult = runtimeContractProbeResult(command)
 
         if (probeResult) {
@@ -659,7 +664,7 @@ describe("autonomous loop", () => {
         }
 
         if (command[0] === "opencode") {
-          await applyMutationTransaction({
+          const nextRevision = await applyMutationTransaction({
             pluginFilePath,
             runtimeContract,
             mutation: {
@@ -671,6 +676,14 @@ describe("autonomous loop", () => {
 
           return {
             stdout: '{"type":"step_start","sessionID":"session-verification-proof"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        if (command.join(" ") === objectiveVerificationCommand.join(" ")) {
+          return {
+            stdout: "objective verification ok\n",
             stderr: "",
             exitCode: 0,
           }
@@ -695,9 +708,12 @@ describe("autonomous loop", () => {
     })
     expect(status.objectives[0]?.lastCompletionEvidence).toMatchObject({
       satisfied: true,
-      passedVerificationCommands: [["bun", "run", "typecheck"]],
       missingVerificationCommands: [],
     })
+    expect(status.objectives[0]?.lastCompletionEvidence?.passedVerificationCommands).toEqual(
+      expect.arrayContaining([objectiveVerificationCommand]),
+    )
+    expect(executedCommands).toContainEqual(objectiveVerificationCommand)
   })
 
   test("records verification and evaluation diagnostics in iteration history", async () => {
@@ -730,7 +746,7 @@ describe("autonomous loop", () => {
         }
 
         if (command[0] === "opencode") {
-          await applyMutationTransaction({
+          const nextRevision = await applyMutationTransaction({
             pluginFilePath,
             runtimeContract,
             mutation: {
@@ -786,6 +802,288 @@ describe("autonomous loop", () => {
         stdout: "eval ok\n",
         stderr: "eval stderr\n",
         changedFiles: ["README.md"],
+      },
+    ])
+  })
+
+  test("persists successful post-promotion verification and evaluation diagnostics", async () => {
+    const first = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "autonomous-review",
+        document: `---
+description: Initial autonomous review flow
+---
+
+Review README.md once.
+`,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    let verificationRuns = 0
+    let evaluationRuns = 0
+    let nextRevisionID: string | null = null
+    const verificationRegistryStates: Array<{ currentRevision: string | null; pendingRevision: string | null }> = []
+    const evaluationRegistryStates: Array<{ currentRevision: string | null; pendingRevision: string | null }> = []
+
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: ["objective-proof"],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          const nextRevision = await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: `---
+description: Updated autonomous review flow
+---
+
+Review README.md twice.
+`,
+            },
+          })
+          nextRevisionID = nextRevision.revisionID
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-post-promotion"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        const registry = await loadRegistry(pluginFilePath, runtimeContract)
+
+        verificationRegistryStates.push({
+          currentRevision: registry.currentRevision,
+          pendingRevision: registry.pendingRevision,
+        })
+
+        verificationRuns += 1
+
+        return {
+          stdout: `typecheck ok ${verificationRuns}\n`,
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+      runEvaluationScenario: async ({ scenarioName }) => {
+        const registry = await loadRegistry(pluginFilePath, runtimeContract)
+
+        evaluationRegistryStates.push({
+          currentRevision: registry.currentRevision,
+          pendingRevision: registry.pendingRevision,
+        })
+
+        evaluationRuns += 1
+
+        return {
+          scenarioName,
+          resultDir: join(repoRoot, "eval-results", `${scenarioName}-${evaluationRuns}`),
+          workspaceRoot: repoRoot,
+          stdout: `eval ok ${evaluationRuns}\n`,
+          stderr: "",
+          exitCode: 0,
+          changedFiles: ["README.md"],
+        }
+      },
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(status.iterations.at(-1)?.verification).toEqual([
+      {
+        command: ["bun", "run", "typecheck"],
+        exitCode: 0,
+        stdout: "typecheck ok 1\n",
+        stderr: "",
+      },
+      {
+        command: ["bun", "run", "typecheck"],
+        exitCode: 0,
+        stdout: "typecheck ok 2\n",
+        stderr: "",
+      },
+    ])
+    expect(status.iterations.at(-1)?.evaluations).toEqual([
+      {
+        scenarioName: "objective-proof",
+        exitCode: 0,
+        stdout: "eval ok 1\n",
+        stderr: "",
+        changedFiles: ["README.md"],
+      },
+      {
+        scenarioName: "objective-proof",
+        exitCode: 0,
+        stdout: "eval ok 2\n",
+        stderr: "",
+        changedFiles: ["README.md"],
+      },
+    ])
+    expect(nextRevisionID).not.toBeNull()
+    expect(verificationRegistryStates).toEqual([
+      { currentRevision: first.revisionID, pendingRevision: nextRevisionID },
+      { currentRevision: nextRevisionID, pendingRevision: null },
+    ])
+    expect(evaluationRegistryStates).toEqual([
+      { currentRevision: first.revisionID, pendingRevision: nextRevisionID },
+      { currentRevision: nextRevisionID, pendingRevision: null },
+    ])
+  })
+
+  test("reruns objective-scoped verification commands after promotion and persists both passes", async () => {
+    const first = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "autonomous-review",
+        document: `---
+description: Initial autonomous review flow
+---
+
+Review README.md once.
+`,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    const objectiveVerificationCommand = ["bun", "test", "tests/unit/validate.test.ts"]
+    let objectiveVerificationRuns = 0
+    let nextRevisionID: string | null = null
+    const objectiveVerificationRegistryStates: Array<{
+      currentRevision: string | null
+      pendingRevision: string | null
+    }> = []
+
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [
+        {
+          prompt: "Update autonomous-review and require objective verification.",
+          completionCriteria: {
+            changedArtifacts: ["command:autonomous-review"],
+            verificationCommands: [objectiveVerificationCommand],
+          },
+        },
+      ],
+    })
+
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          const nextRevision = await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: `---
+description: Updated autonomous review flow
+---
+
+Review README.md twice.
+`,
+            },
+          })
+          nextRevisionID = nextRevision.revisionID
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-objective-post-promotion"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        if (JSON.stringify(command) === JSON.stringify(objectiveVerificationCommand)) {
+          const registry = await loadRegistry(pluginFilePath, runtimeContract)
+
+          objectiveVerificationRegistryStates.push({
+            currentRevision: registry.currentRevision,
+            pendingRevision: registry.pendingRevision,
+          })
+
+          objectiveVerificationRuns += 1
+
+          return {
+            stdout: `objective verification ok ${objectiveVerificationRuns}\n`,
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "default verification ok\n",
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+    const objective = status.objectives[0]
+    const latestIteration = status.iterations.at(-1)
+    const matchingRecords = latestIteration?.verification?.filter((record) =>
+      JSON.stringify(record.command) === JSON.stringify(objectiveVerificationCommand),
+    )
+
+    expect(objectiveVerificationRuns).toBe(2)
+    expect(latestIteration?.decision).toBe("promoted")
+    expect(objective?.status).toBe("completed")
+    expect(objective?.lastDecision).toBe("promoted")
+    expect(objective?.lastCompletionEvidence?.passedVerificationCommands).toEqual(
+      expect.arrayContaining([objectiveVerificationCommand]),
+    )
+    expect(nextRevisionID).not.toBeNull()
+    expect(objectiveVerificationRegistryStates).toEqual([
+      { currentRevision: first.revisionID, pendingRevision: nextRevisionID },
+      { currentRevision: nextRevisionID, pendingRevision: null },
+    ])
+    expect(matchingRecords).toEqual([
+      {
+        command: objectiveVerificationCommand,
+        exitCode: 0,
+        stdout: "objective verification ok 1\n",
+        stderr: "",
+      },
+      {
+        command: objectiveVerificationCommand,
+        exitCode: 0,
+        stdout: "objective verification ok 2\n",
+        stderr: "",
       },
     ])
   })
@@ -1454,6 +1752,7 @@ describe("autonomous loop", () => {
       repoRoot,
       pluginFilePath,
       runtimeContract,
+      evaluationScenarios: [],
       executeCommand: async ({ command }) => {
         executedCommands.push(command)
 
@@ -1502,14 +1801,6 @@ describe("autonomous loop", () => {
           }
         }
 
-        if (command.join(" ") === "opencode agent create --help") {
-          return {
-            stdout: runtimeContract.agentCreateFlags.join("\n"),
-            stderr: "",
-            exitCode: 0,
-          }
-        }
-
         throw new Error(`unexpected command: ${command.join(" ")}`)
       },
     })
@@ -1520,17 +1811,18 @@ describe("autonomous loop", () => {
     expect(executedCommands).toEqual([
       ["opencode", "--version"],
       ["opencode", "run", "--help"],
-      ["opencode", "agent", "create", "--help"],
     ])
   })
 
-  test("skips the iteration before mutation when required agent-create runtime-contract flags are missing", async () => {
+  test("does not require unrelated opencode run flags before running an iteration", async () => {
     const executedCommands: string[][] = []
 
     const result = await runAutonomousIteration({
       repoRoot,
       pluginFilePath,
       runtimeContract,
+      prompt: "Improve the README with the oc-evolver loop.",
+      evaluationScenarios: [],
       executeCommand: async ({ command }) => {
         executedCommands.push(command)
 
@@ -1544,15 +1836,15 @@ describe("autonomous loop", () => {
 
         if (command.join(" ") === "opencode run --help") {
           return {
-            stdout: runtimeContract.runFlags.join("\n"),
+            stdout: runtimeContract.runFlags.filter((flag) => flag !== "--model").join("\n"),
             stderr: "",
             exitCode: 0,
           }
         }
 
-        if (command.join(" ") === "opencode agent create --help") {
+        if (command[0] === "opencode") {
           return {
-            stdout: runtimeContract.agentCreateFlags.filter((flag) => flag !== "--model").join("\n"),
+            stdout: '{"type":"step_start","sessionID":"session-no-pending"}\n',
             stderr: "",
             exitCode: 0,
           }
@@ -1562,13 +1854,21 @@ describe("autonomous loop", () => {
       },
     })
 
-    expect(result.decision).toBe("skipped_unrunnable")
-    expect(result.rejectionReason).toContain("opencode agent create")
-    expect(result.rejectionReason).toContain("--model")
+    expect(result.decision).toBe("no_pending_revision")
+    expect(result.rejectionReason).toBeNull()
     expect(executedCommands).toEqual([
       ["opencode", "--version"],
       ["opencode", "run", "--help"],
-      ["opencode", "agent", "create", "--help"],
+      [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--dir",
+        repoRoot,
+        "--dangerously-skip-permissions",
+        "Improve the README with the oc-evolver loop.",
+      ],
     ])
   })
 

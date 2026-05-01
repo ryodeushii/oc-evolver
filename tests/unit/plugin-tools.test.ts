@@ -38,6 +38,34 @@ describe("plugin tool surface", () => {
     return { exitCode, stdout, stderr }
   }
 
+  function toolOutputText(result: unknown) {
+    if (typeof result === "string") {
+      return result
+    }
+
+    if (result && typeof result === "object" && "output" in result) {
+      const output = (result as { output?: unknown }).output
+      return typeof output === "string" ? output : String(output ?? "")
+    }
+
+    return String(result)
+  }
+
+  function createToolContext() {
+    return {
+      sessionID: "session-plugin-tools",
+      messageID: "message-plugin-tools",
+      agent: "main",
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      abort: new AbortController().signal,
+      metadata() {},
+      ask() {
+        throw new Error("not implemented")
+      },
+    } as never
+  }
+
   test("registers the stable v1 kernel tool set", async () => {
     const hooks = await OCEvolverPlugin({
       client: {
@@ -89,6 +117,7 @@ describe("plugin tool surface", () => {
   })
 
   test("evolver_review_pending returns pending revision review details", async () => {
+    const toolCtx = createToolContext()
     const hooks = await OCEvolverPlugin({
       client: {
         session: {
@@ -108,7 +137,7 @@ describe("plugin tool surface", () => {
       $: {} as never,
     } as never)
 
-    await hooks.tool.evolver_write_command.execute({
+    await hooks.tool?.evolver_write_command?.execute({
       commandName: "review-markdown",
       document: `---
 description: First review flow
@@ -116,9 +145,9 @@ description: First review flow
 
 Review README.md.
 `,
-    })
-    await hooks.tool.evolver_promote.execute({})
-    await hooks.tool.evolver_write_command.execute({
+    }, toolCtx)
+    await hooks.tool?.evolver_promote?.execute({}, toolCtx)
+    await hooks.tool?.evolver_write_command?.execute({
       commandName: "review-markdown",
       document: `---
 description: Second review flow
@@ -126,9 +155,10 @@ description: Second review flow
 
 Review README.md twice.
 `,
-    })
+    }, toolCtx)
 
-    const review = JSON.parse(await hooks.tool.evolver_review_pending.execute({})) as {
+    const reviewResult = await hooks.tool?.evolver_review_pending?.execute({}, toolCtx)
+    const review = JSON.parse(toolOutputText(reviewResult)) as {
       currentRevisionID: string | null
       pendingRevisionID: string | null
       changedArtifacts: { commands: string[] }
@@ -155,12 +185,6 @@ Review README.md twice.
       pendingRevisionID: string | null
       snapshotPath: string | null
     }
-    const deletionState = JSON.parse(
-      await readFile(join(workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"), "utf8"),
-    ) as {
-      deletedCommands: string[]
-    }
-
     expect(persistedReview).toMatchObject({
       currentRevisionID: review.currentRevisionID,
       pendingRevisionID: review.pendingRevisionID,
@@ -172,10 +196,15 @@ Review README.md twice.
       pendingRevisionID: review.pendingRevisionID,
       snapshotPath: `.opencode/oc-evolver/revisions/${review.pendingRevisionID}.json`,
     })
-    expect(deletionState.deletedCommands).toEqual([])
+    await expect(
+      readFile(join(workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"), "utf8"),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    })
   })
 
-  test("evolver_review_pending persists an empty deletion summary when no pending revision exists", async () => {
+  test("evolver_review_pending persists the review snapshot even when no pending revision exists", async () => {
+    const toolCtx = createToolContext()
     const hooks = await OCEvolverPlugin({
       client: {
         session: {
@@ -195,7 +224,7 @@ Review README.md twice.
       $: {} as never,
     } as never)
 
-    await hooks.tool.evolver_write_command.execute({
+    await hooks.tool?.evolver_write_command?.execute({
       commandName: "review-markdown",
       document: `---
 description: First review flow
@@ -203,20 +232,30 @@ description: First review flow
 
 Review README.md.
 `,
-    })
-    await hooks.tool.evolver_promote.execute({})
+    }, toolCtx)
+    await hooks.tool?.evolver_promote?.execute({}, toolCtx)
 
-    const review = JSON.parse(await hooks.tool.evolver_review_pending.execute({})) as {
+    const reviewResult = await hooks.tool?.evolver_review_pending?.execute({}, toolCtx)
+    const review = JSON.parse(toolOutputText(reviewResult)) as {
       pendingRevisionID: string | null
     }
-    const deletionState = JSON.parse(
-      await readFile(join(workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"), "utf8"),
+    const persistedSnapshot = JSON.parse(
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/pending-review-snapshot.json"), "utf8"),
     ) as {
-      deletedCommands: string[]
+      pendingRevisionID: string | null
+      snapshotPath: string | null
     }
 
     expect(review.pendingRevisionID).toBeNull()
-    expect(deletionState.deletedCommands).toEqual([])
+    expect(persistedSnapshot).toEqual({
+      pendingRevisionID: null,
+      snapshotPath: null,
+    })
+    await expect(
+      readFile(join(workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"), "utf8"),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    })
   })
 
   test("autonomous start and resume activate the loop instead of only flipping persisted state", async () => {
@@ -306,6 +345,7 @@ Review README.md.
   })
 
   test("evolver_autonomous_configure accepts objective-level verification commands", async () => {
+    const toolCtx = createToolContext()
     const hooks = await OCEvolverPlugin({
       client: {
         session: {
@@ -325,24 +365,31 @@ Review README.md.
       $: {} as never,
     } as never)
 
-    expect(
-      (
-        hooks.tool.evolver_autonomous_configure.args.objectives.unwrap() as {
-          _def: {
-            element?: {
-              shape?: {
-                completionCriteria?: {
-                  shape?: Record<string, unknown>
+    const objectivesShape = (
+      hooks.tool?.evolver_autonomous_configure as
+        | {
+            args?: {
+              objectives?: {
+                unwrap?: () => {
+                  _def?: {
+                    element?: {
+                      shape?: {
+                        completionCriteria?: {
+                          shape?: Record<string, unknown>
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
           }
-        }
-      )._def.element?.shape?.completionCriteria?.shape,
-    ).toHaveProperty("verificationCommands")
+        | undefined
+    )?.args?.objectives?.unwrap?.()?._def?.element?.shape?.completionCriteria?.shape
 
-    const result = JSON.parse(
-      await hooks.tool.evolver_autonomous_configure.execute({
+    expect(objectivesShape).toHaveProperty("verificationCommands")
+
+    const resultOutput = await hooks.tool?.evolver_autonomous_configure?.execute({
         replaceObjectives: true,
         objectives: [
           {
@@ -352,8 +399,8 @@ Review README.md.
             },
           },
         ],
-      }),
-    ) as {
+      }, toolCtx)
+    const result = JSON.parse(toolOutputText(resultOutput)) as {
       objectives: Array<{
         prompt: string
         completionCriteria: {
@@ -1134,6 +1181,86 @@ Review README.md.
     expect(activationCalls[0]).toMatchObject({
       repoRoot: workspaceRoot,
     })
+    const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
+    expect(auditLog).toContain("autonomous_restore")
+  })
+
+  test("does not record autonomous_restore when startup finds the worker already running", async () => {
+    const pluginModule = await import("../../src/oc-evolver.ts")
+
+    await writeFile(
+      join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+      `${JSON.stringify(
+        {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 60_000,
+            verificationCommands: [["bun", "run", "typecheck"]],
+            evaluationScenarios: ["autonomous-run"],
+            failurePolicy: {
+              maxConsecutiveFailures: 3,
+              escalationAction: "pause_loop",
+              lastEscalationReason: null,
+            },
+          },
+          lastSessionID: null,
+          latestLearning: null,
+          objectives: [],
+          iterations: [],
+        },
+        null,
+        2,
+      )}\n`,
+    )
+
+    const hooks = await (pluginModule.createOCEvolverPlugin as any)(undefined, {
+      activateAutonomousLoop: async () => ({
+        config: {
+          enabled: true,
+          paused: false,
+          intervalMs: 60_000,
+          verificationCommands: [["bun", "run", "typecheck"]],
+          evaluationScenarios: ["autonomous-run"],
+          failurePolicy: {
+            maxConsecutiveFailures: 3,
+            escalationAction: "pause_loop",
+            lastEscalationReason: null,
+          },
+        },
+        lastSessionID: null,
+        latestLearning: null,
+        objectives: [],
+        iterations: [],
+        activation: {
+          mode: "worker_already_running",
+        },
+        iteration: null,
+      }),
+    })({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.config?.({} as never)
+
+    await expect(readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")).rejects.toThrow(
+      /ENOENT/,
+    )
   })
 
   test("uses the global runtime roots in an oc-evolver development workspace", async () => {

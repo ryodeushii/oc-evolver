@@ -720,7 +720,7 @@ Focus on correctness and risk.
           prompt: async (payload: unknown) => {
             promptCalls.push(payload)
 
-            if (promptCalls.length > 1) {
+            if (promptCalls.length > 2) {
               throw new Error("prompt failed")
             }
 
@@ -743,6 +743,33 @@ Focus on correctness and risk.
 
     await hooks.tool?.evolver_write_memory?.execute(
       {
+        memoryName: "session-routing",
+        document: `---
+name: session-routing
+description: Session-owned memory routing
+sources:
+  - memory://plans/oc-evolver/*
+---
+
+Prefer session guidance.
+`,
+      },
+      {
+        sessionID: "session-command-failure",
+        messageID: "message-0",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_write_memory?.execute(
+      {
         memoryName: "command-preferences",
         document: `---
 name: command-preferences
@@ -757,6 +784,24 @@ Prefer command-owned guidance.
       {
         sessionID: "session-command-failure",
         messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_apply_memory?.execute(
+      {
+        memoryName: "session-routing",
+      },
+      {
+        sessionID: "session-command-failure",
+        messageID: "message-1b",
         agent: "main",
         directory: workspaceRoot,
         worktree: workspaceRoot,
@@ -853,6 +898,7 @@ Focus on correctness and risk.
       runtimePolicy?: unknown
     }
 
+    expect(failedSessionState.memories ?? {}).toHaveProperty("session-routing")
     expect(failedSessionState.memories ?? {}).not.toHaveProperty("command-preferences")
     expect(failedSessionState.runtimePolicy).toBeUndefined()
   })
@@ -1003,7 +1049,7 @@ Focus on correctness and risk.
             promptCalls.push(payload)
 
             if (promptCalls.length > 1) {
-              const toolOutput: { status?: "ask" | "deny" | "allow" } = {
+              const toolOutput: { status: "ask" | "deny" | "allow" } = {
                 status: "ask",
               }
 

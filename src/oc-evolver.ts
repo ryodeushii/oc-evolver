@@ -817,7 +817,7 @@ export function createOCEvolverPlugin(
           !autonomousStatus.config.paused &&
           autonomousStatus.config.intervalMs > 0
         ) {
-          await (dependencies.activateAutonomousLoop ?? activateAutonomousLoop)(
+          const activationResult = await (dependencies.activateAutonomousLoop ?? activateAutonomousLoop)(
             {
               repoRoot: autonomousRepoRoot,
               pluginFilePath,
@@ -827,6 +827,19 @@ export function createOCEvolverPlugin(
               runEvaluationScenario: runLoopEvaluationScenario,
             },
           )
+
+          if (activationResult.activation.mode === "worker") {
+            await appendAuditEvent({
+              pluginFilePath,
+              runtimeContract,
+              event: {
+                action: "autonomous_restore",
+                status: "success",
+                target: ".opencode/oc-evolver/autonomous-loop.json",
+                detail: "restored autonomous loop from persisted startup state",
+              },
+            })
+          }
         }
       },
       "permission.ask": async (permission, output) => {

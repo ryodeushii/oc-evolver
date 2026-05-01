@@ -21,8 +21,12 @@ export type AuditEvent = {
     | "delete_artifact"
     | "prune"
     | "promote"
+    | "review_pending"
     | "reject"
     | "rollback"
+    | "autonomous_pause"
+    | "autonomous_resume"
+    | "autonomous_restore"
     | "policy_denied"
   status: "success" | "failure"
   target: string

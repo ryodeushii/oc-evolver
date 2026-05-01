@@ -15,14 +15,15 @@ Use these exact tool calls in order.
 
      ```json
      [
-       {
-         "prompt": "Make exactly one mutation by calling evolver_write_memory with memoryName \"autonomous-evidence-memory\" and document \"---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.\". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.",
-         "completionCriteria": {
-           "changedArtifacts": ["memory:autonomous-evidence-memory"],
-           "evaluationScenarios": ["objective-memory-evidence"]
-         }
-       }
-     ]
+        {
+          "prompt": "Make exactly one mutation by calling evolver_write_memory with memoryName \"autonomous-evidence-memory\" and document \"---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.\". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.",
+          "completionCriteria": {
+            "changedArtifacts": ["memory:autonomous-evidence-memory"],
+            "evaluationScenarios": ["objective-memory-evidence"],
+            "verificationCommands": [["bun", "--version"]]
+          }
+        }
+      ]
      ```
 
 2. Call `evolver_autonomous_start` with no arguments so the queued objective runs through the normal inline autonomous start path.
@@ -46,6 +47,7 @@ Fail unless all of the following are true:
 - `lastCompletionEvidence.satisfied` is `true`
 - `lastCompletionEvidence.changedArtifacts` includes `memory:autonomous-evidence-memory`
 - `lastCompletionEvidence.passedEvaluationScenarios` includes both `smoke` and `objective-memory-evidence`
+- `lastCompletionEvidence.passedVerificationCommands` includes `["bun", "--version"]`
 - the registry has a non-null `currentRevision`
 
 If any check fails, report the failure instead of claiming success.

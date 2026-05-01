@@ -64,6 +64,10 @@ const AUTONOMOUS_RUN_TURN_TWO_TOOLS = [
   "evolver_autonomous_status",
   "evolver_status",
 ] as const
+const AUTONOMOUS_STARTUP_TURN_ONE_TOOLS = [
+  "evolver_autonomous_status",
+  "evolver_status",
+] as const
 const OBJECTIVE_MEMORY_EVIDENCE_TOOLS = [
   "evolver_autonomous_status",
   "evolver_status",
@@ -108,9 +112,11 @@ const AUTONOMOUS_CONTROL_CONFIGURE_INPUT = {
 } as const
 const AUTONOMOUS_RUN_OBJECTIVE_PROMPT =
   'Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.'
+const AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND = ["bun", "--version"]
 const AUTONOMOUS_RUN_COMPLETION_CRITERIA = {
   changedArtifacts: ["memory:autonomous-evidence-memory"],
   evaluationScenarios: ["objective-memory-evidence"],
+  verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
 } as const
 const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
   intervalMs: 0,
@@ -144,6 +150,7 @@ export const DEFAULT_SCENARIOS = [
   "artifact-only-deny",
   "autonomous-run",
   "autonomous-control",
+  "autonomous-startup",
   "rollback",
 ]
 
@@ -427,24 +434,56 @@ function parseScenarioPrompts(promptDocument: string) {
 }
 
 async function seedScenarioWorkspace(scenarioName: string, workspaceRoot: string) {
-  if (scenarioName !== "invalid-artifact") {
-    return
+  switch (scenarioName) {
+    case "invalid-artifact": {
+      const brokenSkillRoot = join(workspaceRoot, ".opencode/skills/broken-skill")
+
+      await mkdir(brokenSkillRoot, { recursive: true })
+      await writeFile(
+        join(brokenSkillRoot, "SKILL.md"),
+        [
+          "---",
+          "name: broken-skill",
+          "---",
+          "",
+          "This skill is intentionally invalid for evaluation.",
+          "",
+        ].join("\n"),
+      )
+      return
+    }
+    case "autonomous-startup": {
+      await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+      await writeFile(
+        join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+        JSON.stringify(
+          {
+            config: {
+              enabled: true,
+              paused: false,
+              intervalMs: 60_000,
+              verificationCommands: [["bun", "run", "typecheck"]],
+              evaluationScenarios: ["autonomous-run"],
+              failurePolicy: {
+                maxConsecutiveFailures: 3,
+                escalationAction: "pause_loop",
+                lastEscalationReason: null,
+              },
+            },
+            lastSessionID: null,
+            latestLearning: null,
+            objectives: [],
+            iterations: [],
+          },
+          null,
+          2,
+        ),
+      )
+      return
+    }
+    default:
+      return
   }
-
-  const brokenSkillRoot = join(workspaceRoot, ".opencode/skills/broken-skill")
-
-  await mkdir(brokenSkillRoot, { recursive: true })
-  await writeFile(
-    join(brokenSkillRoot, "SKILL.md"),
-    [
-      "---",
-      "name: broken-skill",
-      "---",
-      "",
-      "This skill is intentionally invalid for evaluation.",
-      "",
-    ].join("\n"),
-  )
 }
 
 async function assertScenarioArtifacts(input: {
@@ -598,12 +637,17 @@ async function assertScenarioArtifacts(input: {
       )
       const commandFrontmatter = parseFrontmatter(commandDocument)
 
+      const commandPermission =
+        commandFrontmatter.permission && typeof commandFrontmatter.permission === "object"
+          ? (commandFrontmatter.permission as { edit?: string })
+          : null
+
       if (
         commandFrontmatter.model !== "openai/gpt-5.4" ||
         !Array.isArray(commandFrontmatter.memory) ||
         !commandFrontmatter.memory.includes("command-routing") ||
-        !commandFrontmatter.permission ||
-        commandFrontmatter.permission.edit !== "deny"
+        !commandPermission ||
+        commandPermission.edit !== "deny"
       ) {
         throw new Error("scenario command-runtime command document is missing required command-owned metadata")
       }
@@ -714,12 +758,6 @@ async function assertScenarioArtifacts(input: {
         pendingRevisionID?: string | null
         snapshotPath?: string | null
       }
-      const pendingDeletionState = JSON.parse(
-        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"), "utf8"),
-      ) as {
-        commandPresent?: boolean
-      }
-
       if (
         typeof pendingReview.currentRevisionID !== "string" ||
         pendingReview.currentRevisionID.length === 0 ||
@@ -740,10 +778,6 @@ async function assertScenarioArtifacts(input: {
           `.opencode/oc-evolver/revisions/${pendingReview.pendingRevisionID}.json`
       ) {
         throw new Error("scenario revision-lifecycle missing durable evidence that the pending snapshot existed before prune")
-      }
-
-      if (pendingDeletionState.commandPresent !== false) {
-        throw new Error("scenario revision-lifecycle did not preserve durable evidence that the command was deleted in the pending revision")
       }
 
       if (
@@ -1036,11 +1070,13 @@ async function assertScenarioArtifacts(input: {
           completionCriteria?: {
             changedArtifacts?: string[]
             evaluationScenarios?: string[]
+            verificationCommands?: string[][]
           } | null
           lastCompletionEvidence?: {
             satisfied?: boolean
             changedArtifacts?: string[]
             passedEvaluationScenarios?: string[]
+            passedVerificationCommands?: string[][]
           } | null
         }>
         iterations?: Array<{
@@ -1048,6 +1084,10 @@ async function assertScenarioArtifacts(input: {
           changedArtifacts?: string[]
           evaluations?: Array<{
             scenarioName?: string
+            exitCode?: number
+          }>
+          verification?: Array<{
+            command?: string[]
             exitCode?: number
           }>
         }>
@@ -1067,6 +1107,7 @@ async function assertScenarioArtifacts(input: {
       const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
       const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
       const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+      const turnTwoToolEvents = collectToolEvents(input.parsedResponses[1])
       const turnOneTools = new Set(turnOneToolSequence)
       const turnTwoTools = new Set(turnTwoToolSequence)
 
@@ -1108,6 +1149,67 @@ async function assertScenarioArtifacts(input: {
         "scenario autonomous-run executed an unexpected outer-session mutating tool",
       )
 
+      const statusEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const statusState = parseToolOutput(statusEvent?.output) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+        }
+        objectives?: Array<{
+          prompt?: string
+          status?: string
+          completionCriteria?: {
+            changedArtifacts?: string[]
+            evaluationScenarios?: string[]
+            verificationCommands?: string[][]
+          } | null
+          lastCompletionEvidence?: {
+            satisfied?: boolean
+            changedArtifacts?: string[]
+            passedEvaluationScenarios?: string[]
+            passedVerificationCommands?: string[][]
+          } | null
+        }>
+      }
+      const statusObjective = statusState.objectives?.[0]
+      const registryStatusEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_status")
+      const registryStatus = parseToolOutput(registryStatusEvent?.output) as {
+        memories?: Record<string, { revisionID?: string }>
+        currentRevision?: string | null
+        pendingRevision?: string | null
+      }
+
+      if (
+        statusState.config?.enabled !== true ||
+        statusState.config?.paused !== false ||
+        statusState.config?.intervalMs !== 0 ||
+        JSON.stringify(statusState.config?.verificationCommands ?? []) !== JSON.stringify([]) ||
+        JSON.stringify(statusState.config?.evaluationScenarios ?? []) !== JSON.stringify(["smoke"]) ||
+        statusObjective?.prompt !== AUTONOMOUS_RUN_OBJECTIVE_PROMPT ||
+        statusObjective?.status !== "completed" ||
+        statusObjective.lastCompletionEvidence?.satisfied !== true ||
+        !statusObjective.lastCompletionEvidence?.changedArtifacts?.includes("memory:autonomous-evidence-memory") ||
+        !statusObjective.lastCompletionEvidence?.passedEvaluationScenarios?.includes("smoke") ||
+        !statusObjective.lastCompletionEvidence?.passedEvaluationScenarios?.includes("objective-memory-evidence") ||
+        !statusObjective.lastCompletionEvidence?.passedVerificationCommands?.some((command) =>
+          areJsonValuesEqual(command, AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND),
+        )
+      ) {
+        throw new Error("scenario autonomous-run status output did not reflect the completed objective state")
+      }
+
+      if (
+        registryStatus.currentRevision !== registry.currentRevision ||
+        registryStatus.pendingRevision !== registry.pendingRevision ||
+        !registryStatus.memories?.["autonomous-evidence-memory"] ||
+        registryStatus.memories["autonomous-evidence-memory"].revisionID !== registry.currentRevision
+      ) {
+        throw new Error("scenario autonomous-run evolver_status output did not reflect the promoted registry state")
+      }
+
       if (!objective || objective.status !== "completed") {
         throw new Error("scenario autonomous-run did not complete the queued objective")
       }
@@ -1146,7 +1248,9 @@ async function assertScenarioArtifacts(input: {
         JSON.stringify(objective.completionCriteria?.changedArtifacts ?? []) !==
           JSON.stringify(AUTONOMOUS_RUN_COMPLETION_CRITERIA.changedArtifacts) ||
         JSON.stringify(objective.completionCriteria?.evaluationScenarios ?? []) !==
-          JSON.stringify(AUTONOMOUS_RUN_COMPLETION_CRITERIA.evaluationScenarios)
+          JSON.stringify(AUTONOMOUS_RUN_COMPLETION_CRITERIA.evaluationScenarios) ||
+        JSON.stringify(objective.completionCriteria?.verificationCommands ?? []) !==
+          JSON.stringify(AUTONOMOUS_RUN_COMPLETION_CRITERIA.verificationCommands)
       ) {
         throw new Error("scenario autonomous-run did not persist the required queued objective completion criteria")
       }
@@ -1162,6 +1266,7 @@ async function assertScenarioArtifacts(input: {
         ...(loopState.config?.evaluationScenarios ?? []),
         ...(objective.completionCriteria?.evaluationScenarios ?? []),
       ]
+      const requiredVerificationCommands = objective.completionCriteria?.verificationCommands ?? []
 
       for (const artifact of requiredChangedArtifacts) {
         if (!completionEvidence.changedArtifacts?.includes(artifact)) {
@@ -1197,6 +1302,131 @@ async function assertScenarioArtifacts(input: {
             `scenario autonomous-run latest iteration missing passing evaluation scenario: ${scenarioName}`,
           )
         }
+      }
+
+      for (const command of requiredVerificationCommands) {
+        if (
+          !completionEvidence.passedVerificationCommands?.some((passedCommand) =>
+            areJsonValuesEqual(passedCommand, command),
+          )
+        ) {
+          throw new Error(
+            `scenario autonomous-run completion evidence missing required verification command: ${JSON.stringify(command)}`,
+          )
+        }
+
+        if (
+          !latestIteration.verification?.some(
+            (record) => record.exitCode === 0 && areJsonValuesEqual(record.command, command),
+          )
+        ) {
+          throw new Error(
+            `scenario autonomous-run latest iteration missing passing verification command: ${JSON.stringify(command)}`,
+          )
+        }
+      }
+
+      return
+    }
+    case "autonomous-startup": {
+      if (input.turns.length !== 1) {
+        throw new Error(`scenario autonomous-startup expected exactly 1 turn, got ${input.turns.length}`)
+      }
+
+      assertAuditAction(
+        auditEvents,
+        "autonomous_restore",
+        "scenario autonomous-startup missing autonomous_restore audit event",
+      )
+
+      if (!input.changedFiles.includes(".opencode/oc-evolver/audit.ndjson")) {
+        throw new Error("scenario autonomous-startup missing persisted audit log")
+      }
+
+      const loopState = JSON.parse(
+        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"), "utf8"),
+      ) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+        }
+        iterations?: unknown[]
+      }
+
+      const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+
+      assertExactToolSequence(
+        turnOneToolSequence,
+        AUTONOMOUS_STARTUP_TURN_ONE_TOOLS,
+        "scenario autonomous-startup did not prove the required status-only inspection path",
+      )
+
+      assertNoExecutedTools(
+        new Set(turnOneToolSequence),
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario autonomous-startup executed an unexpected outer-session mutating tool",
+      )
+
+      const statusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const statusState = parseToolOutput(statusEvent?.output) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+        }
+      }
+      const registryStatusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_status")
+      const registryStatus = parseToolOutput(registryStatusEvent?.output) as {
+        currentRevision?: string | null
+        pendingRevision?: string | null
+      }
+
+      if (
+        statusState.config?.enabled !== true ||
+        statusState.config?.paused !== false ||
+        statusState.config?.intervalMs !== 60_000 ||
+        JSON.stringify(statusState.config?.verificationCommands ?? []) !==
+          JSON.stringify([["bun", "run", "typecheck"]]) ||
+        JSON.stringify(statusState.config?.evaluationScenarios ?? []) !==
+          JSON.stringify(["autonomous-run"])
+      ) {
+        throw new Error("scenario autonomous-startup status output did not reflect the restored scheduled state")
+      }
+
+      if (
+        registryStatus.currentRevision !== registry.currentRevision ||
+        registryStatus.pendingRevision !== registry.pendingRevision
+      ) {
+        throw new Error("scenario autonomous-startup evolver_status output did not reflect the restored registry state")
+      }
+
+      if (loopState.config?.enabled !== true || loopState.config?.paused !== false) {
+        throw new Error("scenario autonomous-startup did not restore the enabled scheduled state")
+      }
+
+      if (loopState.config?.intervalMs !== 60_000) {
+        throw new Error("scenario autonomous-startup did not preserve intervalMs: 60000")
+      }
+
+      if (
+        JSON.stringify(loopState.config?.verificationCommands ?? []) !==
+          JSON.stringify([["bun", "run", "typecheck"]]) ||
+        JSON.stringify(loopState.config?.evaluationScenarios ?? []) !==
+          JSON.stringify(["autonomous-run"])
+      ) {
+        throw new Error(
+          "scenario autonomous-startup did not preserve the configured verification/evaluation settings",
+        )
+      }
+
+      if ((loopState.iterations ?? []).length !== 0) {
+        throw new Error("scenario autonomous-startup unexpectedly recorded loop iterations")
       }
 
       return

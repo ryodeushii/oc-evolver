@@ -8,9 +8,12 @@ import {
   runEvaluationScenario,
   type EvalCommandResult,
 } from "../../scripts/run-eval.ts"
+import { createOCEvolverPlugin } from "../../src/oc-evolver.ts"
+import { activateAutonomousLoop } from "../../src/kernel/autonomous-loop.ts"
 
 const AUTONOMOUS_RUN_OBJECTIVE_PROMPT =
   'Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.'
+const AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND = ["bun", "--version"]
 const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
   intervalMs: 0,
   verificationCommands: [],
@@ -25,6 +28,7 @@ const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
       completionCriteria: {
         changedArtifacts: ["memory:autonomous-evidence-memory"],
         evaluationScenarios: ["objective-memory-evidence"],
+        verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
       },
     },
   ],
@@ -86,6 +90,36 @@ describe("evaluation scenarios", () => {
 
   afterEach(async () => {
     await rm(repoRoot, { recursive: true, force: true })
+  })
+
+  test("autonomous-run uses a fixture-safe objective verification command", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-run.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
+    )
+
+    const scenarioDocument = await readFile(join(repoRoot, "eval/scenarios/autonomous-run.md"), "utf8")
+
+    expect(AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND).toEqual(["bun", "--version"])
+    expect(scenarioDocument).toContain('["bun", "--version"]')
+  })
+
+  test("command-runtime docs state that successful command runs persist merged session memory state", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/command-runtime.md"),
+      await readFile(new URL("../../eval/scenarios/command-runtime.md", import.meta.url), "utf8"),
+    )
+    await writeFile(
+      join(repoRoot, "README.md"),
+      await readFile(new URL("../../README.md", import.meta.url), "utf8"),
+    )
+
+    const scenarioDocument = await readFile(join(repoRoot, "eval/scenarios/command-runtime.md"), "utf8")
+    const readmeDocument = await readFile(join(repoRoot, "README.md"), "utf8")
+
+    expect(scenarioDocument).toContain("successful command run leaves the continued session retaining both `session-routing` and `command-routing`")
+    expect(readmeDocument).toContain("after a successful command run")
+    expect(readmeDocument).toContain("persisting the resulting runtime policy and merged memory state for the continued session")
   })
 
   test("reuse-skill scenario continues the same session across turns and verifies persisted artifacts", async () => {
@@ -408,13 +442,16 @@ describe("evaluation scenarios", () => {
                     completionCriteria: {
                       changedArtifacts: ["memory:autonomous-evidence-memory"],
                       evaluationScenarios: ["objective-memory-evidence"],
+                      verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
                     },
                     lastCompletionEvidence: {
                       satisfied: true,
                       changedArtifacts: ["memory:autonomous-evidence-memory"],
                       passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                      passedVerificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
                       missingChangedArtifacts: [],
                       missingEvaluationScenarios: [],
+                      missingVerificationCommands: [],
                       checkedAt: new Date(0).toISOString(),
                     },
                     attempts: 1,
@@ -436,6 +473,12 @@ describe("evaluation scenarios", () => {
                       },
                       {
                         scenarioName: "objective-memory-evidence",
+                        exitCode: 0,
+                      },
+                    ],
+                    verification: [
+                      {
+                        command: AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND,
                         exitCode: 0,
                       },
                     ],
@@ -489,8 +532,62 @@ describe("evaluation scenarios", () => {
 
         return {
           stdout: [
-            '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-auto-1"}',
-            '{"type":"tool","tool":"evolver_status","sessionID":"ses-auto-1"}',
+            buildToolEvent(
+              "evolver_autonomous_status",
+              "ses-auto-1",
+              {},
+              JSON.stringify({
+                config: {
+                  enabled: true,
+                  paused: false,
+                  intervalMs: 0,
+                  verificationCommands: [],
+                  evaluationScenarios: ["smoke"],
+                },
+                objectives: [
+                  {
+                    prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                    status: "completed",
+                    completionCriteria: {
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluationScenarios: ["objective-memory-evidence"],
+                      verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                    },
+                    lastCompletionEvidence: {
+                      satisfied: true,
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                      passedVerificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                      missingChangedArtifacts: [],
+                      missingEvaluationScenarios: [],
+                      missingVerificationCommands: [],
+                    },
+                  },
+                ],
+              }),
+            ),
+                buildToolEvent(
+                  "evolver_status",
+                  "ses-auto-1",
+                  {},
+                  JSON.stringify({
+                    skills: {},
+                    agents: {},
+                    commands: {},
+                    memories: {
+                      "autonomous-evidence-memory": {
+                        kind: "memory",
+                        name: "autonomous-evidence-memory",
+                        nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                        revisionID: "rev-auto-1",
+                        contentHash: "ab".repeat(32),
+                      },
+                    },
+                    quarantine: {},
+                    currentRevision: "rev-auto-1",
+                    pendingRevision: null,
+                  }),
+                ),
           ].join("\n"),
           stderr: "",
           exitCode: 0,
@@ -558,10 +655,11 @@ describe("evaluation scenarios", () => {
                     {
                       prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
                       status: "pending",
-                      completionCriteria: {
-                        changedArtifacts: ["memory:autonomous-evidence-memory"],
-                        evaluationScenarios: ["objective-memory-evidence"],
-                      },
+                    completionCriteria: {
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluationScenarios: ["objective-memory-evidence"],
+                      verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                    },
                       lastCompletionEvidence: null,
                       attempts: 1,
                       consecutiveFailures: 0,
@@ -621,15 +719,243 @@ describe("evaluation scenarios", () => {
 
           return {
             stdout: [
-              '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-auto-2"}',
-              '{"type":"tool","tool":"evolver_status","sessionID":"ses-auto-2"}',
+              buildToolEvent(
+                "evolver_autonomous_status",
+                "ses-auto-2",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "pending",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                        verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                      },
+                      lastCompletionEvidence: null,
+                    },
+                  ],
+                }),
+              ),
+                buildToolEvent(
+                  "evolver_status",
+                  "ses-auto-2",
+                  {},
+                  JSON.stringify({
+                    skills: {},
+                    agents: {},
+                    commands: {},
+                    memories: {},
+                    quarantine: {},
+                    currentRevision: "rev-auto-2",
+                    pendingRevision: null,
+                  }),
+                ),
             ].join("\n"),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/queued objective|completion evidence/i)
+    ).rejects.toThrow(/queued objective|completion evidence|status output did not reflect/i)
+  })
+
+  test("autonomous-run scenario rejects stale status output even when persisted state looks promoted", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-run.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
+    )
+
+    let executionCount = 0
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-run",
+        timestamp: "2026-04-30T14-16-15.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          executionCount += 1
+
+          if (executionCount === 1) {
+            await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+            await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+            await writeFile(
+              join(workspaceRoot, ".opencode/memory/autonomous-evidence-memory.md"),
+              "---\nname: autonomous-evidence-memory\ndescription: Evidence fixture for autonomous eval coverage.\n---\n\n# Autonomous Evidence Memory\n\nThis artifact exists to verify autonomous completion evidence and promotion behavior.\n",
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+              JSON.stringify(
+                {
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                    failurePolicy: {
+                      maxConsecutiveFailures: 3,
+                      escalationAction: "pause_loop",
+                      lastEscalationReason: null,
+                    },
+                  },
+                  lastSessionID: "ses-auto-stale",
+                  latestLearning: {
+                    summary: "The last autonomous iteration was promoted at revision rev-auto-stale.",
+                    remainingObjectives: [],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "completed",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                        verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                      },
+                      lastCompletionEvidence: {
+                        satisfied: true,
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        passedVerificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                        missingChangedArtifacts: [],
+                        missingEvaluationScenarios: [],
+                        missingVerificationCommands: [],
+                        checkedAt: new Date(0).toISOString(),
+                      },
+                      attempts: 1,
+                      consecutiveFailures: 0,
+                      updatedAt: new Date(0).toISOString(),
+                      lastSessionID: "ses-auto-stale",
+                      lastDecision: "promoted",
+                      lastEscalationReason: null,
+                    },
+                  ],
+                  iterations: [
+                    {
+                      decision: "promoted",
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluations: [
+                        { scenarioName: "smoke", exitCode: 0 },
+                        { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                      verification: [
+                        {
+                          command: AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND,
+                          exitCode: 0,
+                        },
+                      ],
+                    },
+                  ],
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {
+                    "autonomous-evidence-memory": {
+                      kind: "memory",
+                      name: "autonomous-evidence-memory",
+                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                      revisionID: "rev-auto-stale",
+                      contentHash: "d".repeat(64),
+                    },
+                  },
+                  quarantine: {},
+                  currentRevision: "rev-auto-stale",
+                  pendingRevision: null,
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              '{"action":"promote","status":"success","revisionID":"rev-auto-stale"}\n',
+            )
+
+            return {
+              stdout: [
+                buildToolEvent("evolver_autonomous_configure", "ses-auto-stale", AUTONOMOUS_RUN_CONFIGURE_INPUT),
+                buildToolEvent("evolver_autonomous_start", "ses-auto-stale", {}),
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: [
+              buildToolEvent(
+                "evolver_autonomous_status",
+                "ses-auto-stale",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "pending",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                        verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                      },
+                      lastCompletionEvidence: null,
+                    },
+                  ],
+                }),
+              ),
+              buildToolEvent(
+                "evolver_status",
+                "ses-auto-stale",
+                {},
+                JSON.stringify({
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {
+                    "autonomous-evidence-memory": {
+                      kind: "memory",
+                      name: "autonomous-evidence-memory",
+                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                      revisionID: "rev-auto-stale",
+                      contentHash: "ab".repeat(32),
+                    },
+                  },
+                  quarantine: {},
+                  currentRevision: "rev-auto-stale",
+                  pendingRevision: null,
+                }),
+              ),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/status output|queued objective|completed/i)
   })
 
   test("autonomous-run scenario rejects runs with the wrong configure payload", async () => {
@@ -680,16 +1006,19 @@ describe("evaluation scenarios", () => {
                     {
                       prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
                       status: "completed",
-                      completionCriteria: {
-                        changedArtifacts: ["memory:autonomous-evidence-memory"],
-                        evaluationScenarios: ["objective-memory-evidence"],
-                      },
+                    completionCriteria: {
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluationScenarios: ["objective-memory-evidence"],
+                      verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                    },
                       lastCompletionEvidence: {
                         satisfied: true,
                         changedArtifacts: ["memory:autonomous-evidence-memory"],
                         passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        passedVerificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
                         missingChangedArtifacts: [],
                         missingEvaluationScenarios: [],
+                        missingVerificationCommands: [],
                         checkedAt: new Date(0).toISOString(),
                       },
                       attempts: 1,
@@ -707,6 +1036,12 @@ describe("evaluation scenarios", () => {
                       evaluations: [
                         { scenarioName: "smoke", exitCode: 0 },
                         { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                      verification: [
+                        {
+                          command: AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND,
+                          exitCode: 0,
+                        },
                       ],
                     },
                   ],
@@ -760,7 +1095,28 @@ describe("evaluation scenarios", () => {
           return {
             stdout: [
               buildToolEvent("evolver_autonomous_status", "ses-auto-2b", {}),
-              buildToolEvent("evolver_status", "ses-auto-2b", {}),
+              buildToolEvent(
+                "evolver_status",
+                "ses-auto-2b",
+                {},
+                JSON.stringify({
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {
+                    "autonomous-evidence-memory": {
+                      kind: "memory",
+                      name: "autonomous-evidence-memory",
+                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                      revisionID: "rev-auto-2b",
+                      contentHash: "ab".repeat(32),
+                    },
+                  },
+                  quarantine: {},
+                  currentRevision: "rev-auto-2b",
+                  pendingRevision: null,
+                }),
+              ),
             ].join("\n"),
             stderr: "",
             exitCode: 0,
@@ -818,16 +1174,19 @@ describe("evaluation scenarios", () => {
                     {
                       prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
                       status: "completed",
-                      completionCriteria: {
-                        changedArtifacts: ["memory:autonomous-evidence-memory"],
-                        evaluationScenarios: ["objective-memory-evidence"],
-                      },
+                    completionCriteria: {
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluationScenarios: ["objective-memory-evidence"],
+                      verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                    },
                       lastCompletionEvidence: {
                         satisfied: true,
                         changedArtifacts: ["memory:autonomous-evidence-memory"],
                         passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        passedVerificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
                         missingChangedArtifacts: [],
                         missingEvaluationScenarios: [],
+                        missingVerificationCommands: [],
                         checkedAt: new Date(0).toISOString(),
                       },
                       attempts: 1,
@@ -845,6 +1204,12 @@ describe("evaluation scenarios", () => {
                       evaluations: [
                         { scenarioName: "smoke", exitCode: 0 },
                         { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                      verification: [
+                        {
+                          command: AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND,
+                          exitCode: 0,
+                        },
                       ],
                     },
                   ],
@@ -950,16 +1315,19 @@ describe("evaluation scenarios", () => {
                     {
                       prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
                       status: "completed",
-                      completionCriteria: {
-                        changedArtifacts: ["memory:autonomous-evidence-memory"],
-                        evaluationScenarios: ["objective-memory-evidence"],
-                      },
+                    completionCriteria: {
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluationScenarios: ["objective-memory-evidence"],
+                      verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                    },
                       lastCompletionEvidence: {
                         satisfied: true,
                         changedArtifacts: ["memory:autonomous-evidence-memory"],
                         passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        passedVerificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
                         missingChangedArtifacts: [],
                         missingEvaluationScenarios: [],
+                        missingVerificationCommands: [],
                         checkedAt: new Date(0).toISOString(),
                       },
                       attempts: 1,
@@ -977,6 +1345,12 @@ describe("evaluation scenarios", () => {
                       evaluations: [
                         { scenarioName: "smoke", exitCode: 0 },
                         { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                      verification: [
+                        {
+                          command: AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND,
+                          exitCode: 0,
+                        },
                       ],
                     },
                   ],
@@ -1094,13 +1468,16 @@ describe("evaluation scenarios", () => {
                       completionCriteria: {
                         changedArtifacts: ["memory:autonomous-evidence-memory"],
                         evaluationScenarios: ["objective-memory-evidence"],
+                        verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
                       },
                       lastCompletionEvidence: {
                         satisfied: true,
                         changedArtifacts: ["memory:autonomous-evidence-memory"],
                         passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        passedVerificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
                         missingChangedArtifacts: [],
                         missingEvaluationScenarios: [],
+                        missingVerificationCommands: [],
                         checkedAt: new Date(0).toISOString(),
                       },
                       attempts: 1,
@@ -1118,6 +1495,12 @@ describe("evaluation scenarios", () => {
                       evaluations: [
                         { scenarioName: "smoke", exitCode: 0 },
                         { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                      verification: [
+                        {
+                          command: AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND,
+                          exitCode: 0,
+                        },
                       ],
                     },
                   ],
@@ -1645,10 +2028,6 @@ describe("evaluation scenarios", () => {
             ),
           )
           await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"),
-            JSON.stringify({ commandPresent: false }, null, 2),
-          )
-          await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
             JSON.stringify(
               {
@@ -1811,10 +2190,6 @@ describe("evaluation scenarios", () => {
                 null,
                 2,
               ),
-            )
-            await writeFile(
-              join(workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"),
-              JSON.stringify({ commandPresent: false }, null, 2),
             )
             await writeFile(
               join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
@@ -2234,5 +2609,444 @@ describe("evaluation scenarios", () => {
         },
       }),
     ).rejects.toThrow(/paused-state evidence|paused/i)
+  })
+
+  test("autonomous-startup scenario is part of the default sweep and captures startup restoration evidence", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-startup.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-startup.md", import.meta.url), "utf8"),
+    )
+
+    const activationCalls: Array<Record<string, unknown>> = []
+    let scenarioWorkspaceRoot = ""
+
+    const result = await runEvaluationScenario({
+      repoRoot,
+      scenarioName: "autonomous-startup",
+      timestamp: "2026-04-30T14-33-00.000Z",
+      executeCommand: async ({ workspaceRoot }) => {
+        scenarioWorkspaceRoot = workspaceRoot
+        const seededLoopState = JSON.parse(
+          await readFile(join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"), "utf8"),
+        ) as {
+          config?: {
+            enabled?: boolean
+            paused?: boolean
+            intervalMs?: number
+          }
+        }
+
+        expect(seededLoopState.config).toMatchObject({
+          enabled: true,
+          paused: false,
+          intervalMs: 60_000,
+        })
+
+        const hooks = await (createOCEvolverPlugin as any)(undefined, {
+          activateAutonomousLoop: async (input: Record<string, unknown>) =>
+            activateAutonomousLoop(input as any, {
+              startWorker: (config: Record<string, unknown>) => {
+                activationCalls.push(config)
+
+                return {
+                  once() {},
+                  terminate: async () => 0,
+                } as never
+              },
+            }),
+        })({
+          client: {
+            session: {
+              prompt: async () => ({ info: {}, parts: [] }),
+            },
+          },
+          project: {
+            id: "eval-startup-project",
+            worktree: workspaceRoot,
+          },
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          experimental_workspace: {
+            register() {},
+          },
+          serverUrl: new URL("http://localhost:4096"),
+          $: {} as never,
+        } as never)
+
+        await hooks.config?.({} as never)
+
+        const autonomousStatusOutput = await hooks.tool.evolver_autonomous_status.execute({}, { sessionID: "ses-autonomous-startup" } as never)
+        const registryStatusOutput = await hooks.tool.evolver_status.execute({}, { sessionID: "ses-autonomous-startup" } as never)
+
+        return {
+          stdout: [
+            buildToolEvent(
+              "evolver_autonomous_status",
+              "ses-autonomous-startup",
+              {},
+              autonomousStatusOutput,
+            ),
+            buildToolEvent("evolver_status", "ses-autonomous-startup", {}, registryStatusOutput),
+          ].join("\n"),
+          stderr: "",
+          exitCode: 0,
+        } satisfies EvalCommandResult
+      },
+    })
+
+    const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
+      changedFiles: string[]
+    }
+
+    expect(DEFAULT_SCENARIOS).toContain("autonomous-startup")
+    expect(activationCalls).toHaveLength(1)
+    expect(activationCalls[0]).toMatchObject({
+      repoRoot: scenarioWorkspaceRoot,
+      pluginFilePath: join(scenarioWorkspaceRoot, ".opencode/plugins/oc-evolver.ts"),
+      intervalMs: 60_000,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: ["autonomous-run"],
+    })
+    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/audit.ndjson")
+  })
+
+  test("autonomous-startup scenario rejects runs that lack startup restoration audit evidence", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-startup.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-startup.md", import.meta.url), "utf8"),
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+      scenarioName: "autonomous-startup",
+      timestamp: "2026-04-30T14-33-30.000Z",
+      executeCommand: async ({ workspaceRoot }) => {
+          return {
+            stdout: [
+              buildToolEvent(
+                "evolver_autonomous_status",
+                "ses-autonomous-startup-bad",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 60_000,
+                    verificationCommands: [["bun", "run", "typecheck"]],
+                    evaluationScenarios: ["autonomous-run"],
+                  },
+                }),
+              ),
+              buildToolEvent(
+                "evolver_status",
+                "ses-autonomous-startup-bad",
+                {},
+                JSON.stringify({
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {},
+                  quarantine: {},
+                  currentRevision: null,
+                  pendingRevision: null,
+                }),
+              ),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/autonomous_restore|startup restoration/i)
+  })
+
+  test("autonomous-startup scenario rejects stale status output even when files look restored", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-startup.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-startup.md", import.meta.url), "utf8"),
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-startup",
+        timestamp: "2026-04-30T14-34-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            JSON.stringify({ action: "autonomous_restore", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }) + "\n",
+          )
+
+          return {
+            stdout: [
+              buildToolEvent(
+                "evolver_autonomous_status",
+                "ses-autonomous-startup-stale",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: false,
+                    paused: true,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: [],
+                  },
+                }),
+              ),
+              buildToolEvent(
+                "evolver_status",
+                "ses-autonomous-startup-stale",
+                {},
+                JSON.stringify({
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {},
+                  quarantine: {},
+                  currentRevision: null,
+                  pendingRevision: "rev-pending-startup",
+                }),
+              ),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/status output|enabled|paused|interval|pending/i)
+  })
+
+  test("autonomous-run scenario rejects stale evolver_status output even when autonomous status is correct", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-run.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
+    )
+
+    let executionCount = 0
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-run",
+        timestamp: "2026-04-30T14-16-45.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          executionCount += 1
+
+          if (executionCount === 1) {
+            await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+            await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+            await writeFile(
+              join(workspaceRoot, ".opencode/memory/autonomous-evidence-memory.md"),
+              "---\nname: autonomous-evidence-memory\ndescription: Evidence fixture for autonomous eval coverage.\n---\n\n# Autonomous Evidence Memory\n",
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+              JSON.stringify(
+                {
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                    failurePolicy: {
+                      maxConsecutiveFailures: 3,
+                      escalationAction: "pause_loop",
+                      lastEscalationReason: null,
+                    },
+                  },
+                  lastSessionID: "ses-auto-status-stale",
+                  latestLearning: {
+                    summary: "The last autonomous iteration was promoted at revision rev-auto-status-stale.",
+                    remainingObjectives: [],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "completed",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                        verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                      },
+                      lastCompletionEvidence: {
+                        satisfied: true,
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        passedVerificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                        missingChangedArtifacts: [],
+                        missingEvaluationScenarios: [],
+                        missingVerificationCommands: [],
+                        checkedAt: new Date(0).toISOString(),
+                      },
+                      attempts: 1,
+                      consecutiveFailures: 0,
+                      updatedAt: new Date(0).toISOString(),
+                      lastSessionID: "ses-auto-status-stale",
+                      lastDecision: "promoted",
+                      lastEscalationReason: null,
+                    },
+                  ],
+                  iterations: [
+                    {
+                      decision: "promoted",
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluations: [
+                        { scenarioName: "smoke", exitCode: 0 },
+                        { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                      verification: [
+                        {
+                          command: AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND,
+                          exitCode: 0,
+                        },
+                      ],
+                    },
+                  ],
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {
+                    "autonomous-evidence-memory": {
+                      kind: "memory",
+                      name: "autonomous-evidence-memory",
+                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                      revisionID: "rev-auto-status-stale",
+                      contentHash: "ab".repeat(32),
+                    },
+                  },
+                  quarantine: {},
+                  currentRevision: "rev-auto-status-stale",
+                  pendingRevision: null,
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              '{"action":"promote","status":"success","revisionID":"rev-auto-status-stale"}\n',
+            )
+
+            return {
+              stdout: [
+                buildToolEvent("evolver_autonomous_configure", "ses-auto-status-stale", AUTONOMOUS_RUN_CONFIGURE_INPUT),
+                buildToolEvent("evolver_autonomous_start", "ses-auto-status-stale", {}),
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: [
+              buildToolEvent(
+                "evolver_autonomous_status",
+                "ses-auto-status-stale",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "completed",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                        verificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                      },
+                      lastCompletionEvidence: {
+                        satisfied: true,
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        passedVerificationCommands: [AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND],
+                      },
+                    },
+                  ],
+                }),
+              ),
+              buildToolEvent("evolver_status", "ses-auto-status-stale", {}, JSON.stringify({
+                skills: {},
+                agents: {},
+                commands: {},
+                memories: {},
+                quarantine: {},
+                currentRevision: null,
+                pendingRevision: "rev-pending-status-stale",
+              })),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/status output|currentRevision|pendingRevision/i)
+  })
+
+  test("autonomous-startup scenario rejects stale evolver_status output even when autonomous status is correct", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-startup.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-startup.md", import.meta.url), "utf8"),
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-startup",
+        timestamp: "2026-04-30T14-34-15.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            JSON.stringify({ action: "autonomous_restore", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }) + "\n",
+          )
+
+          return {
+            stdout: [
+              buildToolEvent(
+                "evolver_autonomous_status",
+                "ses-autonomous-startup-status-stale",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 60_000,
+                    verificationCommands: [["bun", "run", "typecheck"]],
+                    evaluationScenarios: ["autonomous-run"],
+                  },
+                }),
+              ),
+              buildToolEvent("evolver_status", "ses-autonomous-startup-status-stale", {}, JSON.stringify({
+                skills: {},
+                agents: {},
+                commands: {},
+                memories: {},
+                quarantine: {},
+                currentRevision: "rev-unexpected-startup",
+                pendingRevision: "rev-pending-startup",
+              })),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/status output|currentRevision|pendingRevision/i)
   })
 })

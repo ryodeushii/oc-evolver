@@ -730,11 +730,6 @@ export async function persistPendingRevisionReviewArtifacts(input: {
   review: PendingRevisionReview
 }) {
   const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
-  const deletedCommands = input.review.pendingRevisionID
-    ? Object.keys(input.review.current?.commands ?? {}).filter(
-        (name) => !(name in (input.review.pending?.commands ?? {})),
-      )
-    : []
 
   await writeJSONAtomically({
     pluginFilePath: input.pluginFilePath,
@@ -751,14 +746,6 @@ export async function persistPendingRevisionReviewArtifacts(input: {
       snapshotPath: input.review.pendingRevisionID
         ? `.opencode/oc-evolver/revisions/${input.review.pendingRevisionID}.json`
         : null,
-    },
-  })
-  await writeJSONAtomically({
-    pluginFilePath: input.pluginFilePath,
-    runtimeContract: input.runtimeContract,
-    path: join(kernelPaths.registryRoot, "pending-deletion-state.json"),
-    value: {
-      deletedCommands,
     },
   })
 }

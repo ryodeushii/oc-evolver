@@ -318,11 +318,13 @@ export async function runCommandInSession(input: {
     },
     ...(preferredModel ? { preferredModel } : {}),
   }
-  const previousMemoryState = await loadSessionMemoryState({
-    pluginFilePath: input.pluginFilePath,
-    runtimeContract: input.runtimeContract,
-    sessionID: input.sessionID,
-  })
+  const previousMemoryState = cloneSessionMemoryState(
+    await loadSessionMemoryState({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      sessionID: input.sessionID,
+    }),
+  )
   const previousRuntimePolicy = await loadSessionRuntimePolicy({
     pluginFilePath: input.pluginFilePath,
     runtimeContract: input.runtimeContract,
@@ -763,6 +765,14 @@ async function restoreSessionRuntimeState(input: {
 
 function mergeMemoryNames(...memoryNameLists: string[][]) {
   return [...new Set(memoryNameLists.flat())]
+}
+
+function cloneSessionMemoryState(memoryState: Map<string, SessionMemoryState> | null) {
+  return memoryState
+    ? new Map(
+        [...memoryState.entries()].map(([memoryName, profile]) => [memoryName, { ...profile }]),
+      )
+    : null
 }
 
 function formatMemoryProfilePrompt(memoryProfile: LoadedMemoryProfile) {

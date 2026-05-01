@@ -195,7 +195,6 @@ export type AutonomousLoopWorkerConfig = {
 
 type RuntimeContractFlags = {
   runFlags: string[]
-  agentCreateFlags: string[]
 }
 
 export type AutonomousLoopSchedulePolicy = {
@@ -523,10 +522,14 @@ export async function runAutonomousIteration(
       objectivePrompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
       state.latestLearning,
     )
-    const verificationCommands = normalizeCommandMatrix(
+    const configuredVerificationCommands = normalizeCommandMatrix(
       input.verificationCommands ?? state.config.verificationCommands,
       DEFAULT_VERIFICATION_COMMANDS,
     )
+    const verificationCommands = dedupeCommandMatrix([
+      ...configuredVerificationCommands,
+      ...collectObjectiveVerificationCommands(state.objectives, objectivePrompt),
+    ])
     const configuredEvaluationScenarios =
       input.evaluationScenarios !== undefined
         ? dedupeStrings(input.evaluationScenarios)
@@ -538,6 +541,7 @@ export async function runAutonomousIteration(
     const runtimeContractMismatch = await validateAutonomousRuntimeContractCompatibility({
       repoRoot: input.repoRoot,
       runtimeContract: input.runtimeContract,
+      sessionID: state.lastSessionID,
       executeCommand,
     })
 
@@ -797,6 +801,9 @@ export async function runAutonomousIteration(
 
     await promotePendingRevision(input.pluginFilePath, input.runtimeContract)
 
+    let finalVerificationRecords = aggregatedVerificationRecords
+    let finalEvaluationRecords = aggregatedEvaluationRecords
+
     if (registryBeforeMutation.currentRevision) {
       const healthVerification = await runVerificationCommands({
         cwd: input.repoRoot,
@@ -828,6 +835,8 @@ export async function runAutonomousIteration(
         })
       }
 
+      finalVerificationRecords = [...aggregatedVerificationRecords, ...healthVerification.records]
+
       const healthEvaluations = await runEvaluationScenarios({
         repoRoot: input.repoRoot,
         scenarios: evaluationScenarios,
@@ -857,6 +866,8 @@ export async function runAutonomousIteration(
           },
         })
       }
+
+      finalEvaluationRecords = [...aggregatedEvaluationRecords, ...healthEvaluations.records]
     }
 
     return await finalizeAutonomousIteration({
@@ -873,8 +884,8 @@ export async function runAutonomousIteration(
         rejectionReason: null,
         prompt: currentPrompt,
         objectivePrompt,
-        verification: aggregatedVerificationRecords,
-        evaluations: aggregatedEvaluationRecords,
+        verification: finalVerificationRecords,
+        evaluations: finalEvaluationRecords,
         changedArtifacts: collectChangedArtifacts(registryAfterMutation, pendingRevisionID),
       },
     })
@@ -969,12 +980,7 @@ function assertRuntimeContractSupportsAutonomousRun(
   runtimeContract: OCEvolverRuntimeContract,
   sessionID: string | null,
 ) {
-  const requiredFlags = [
-    "--format",
-    "--dir",
-    "--dangerously-skip-permissions",
-    ...(sessionID ? ["--session"] : []),
-  ]
+  const requiredFlags = resolveAutonomousRunRequiredFlags(sessionID)
   const missingFlags = requiredFlags.filter((flag) => !runtimeContract.runFlags.includes(flag))
 
   if (missingFlags.length > 0) {
@@ -982,6 +988,15 @@ function assertRuntimeContractSupportsAutonomousRun(
       `runtime contract is missing required autonomous run flags: ${missingFlags.join(", ")}`,
     )
   }
+}
+
+function resolveAutonomousRunRequiredFlags(sessionID: string | null) {
+  return [
+    "--format",
+    "--dir",
+    "--dangerously-skip-permissions",
+    ...(sessionID ? ["--session"] : []),
+  ]
 }
 
 function buildAutonomousPrompt(
@@ -1028,6 +1043,7 @@ function buildAutonomousRepairPrompt(input: {
 async function validateAutonomousRuntimeContractCompatibility(input: {
   repoRoot: string
   runtimeContract: OCEvolverRuntimeContract
+  sessionID: string | null
   executeCommand: (input: { cwd: string; command: string[] }) => Promise<AutonomousLoopCommandResult>
 }) {
   const versionResult = await input.executeCommand({
@@ -1057,20 +1073,12 @@ async function validateAutonomousRuntimeContractCompatibility(input: {
     return runtimeFlags.reason
   }
 
-  const missingRunFlags = input.runtimeContract.runFlags.filter(
+  const missingRunFlags = resolveAutonomousRunRequiredFlags(input.sessionID).filter(
     (flag) => !runtimeFlags.runFlags.includes(flag),
   )
 
   if (missingRunFlags.length > 0) {
     return `runtime contract mismatch: opencode run is missing required flags: ${missingRunFlags.join(", ")}`
-  }
-
-  const missingAgentCreateFlags = input.runtimeContract.agentCreateFlags.filter(
-    (flag) => !runtimeFlags.agentCreateFlags.includes(flag),
-  )
-
-  if (missingAgentCreateFlags.length > 0) {
-    return `runtime contract mismatch: opencode agent create is missing required flags: ${missingAgentCreateFlags.join(", ")}`
   }
 
   return null
@@ -1131,23 +1139,8 @@ async function loadRuntimeContractFlags(input: {
     }
   }
 
-  const agentCreateHelp = await input.executeCommand({
-    cwd: input.repoRoot,
-    command: ["opencode", "agent", "create", "--help"],
-  })
-
-  if (agentCreateHelp.exitCode !== 0) {
-    return {
-      reason: formatRuntimeContractFailure({
-        command: ["opencode", "agent", "create", "--help"],
-        result: agentCreateHelp,
-      }),
-    }
-  }
-
   return {
     runFlags: extractFlagsFromHelp(runHelp.stdout, runHelp.stderr),
-    agentCreateFlags: extractFlagsFromHelp(agentCreateHelp.stdout, agentCreateHelp.stderr),
   }
 }
 
@@ -1869,6 +1862,20 @@ function collectObjectiveEvaluationScenarios(
 
   return objectives.find((objective) => objective.prompt === objectivePrompt)?.completionCriteria
     ?.evaluationScenarios ?? []
+}
+
+function collectObjectiveVerificationCommands(
+  objectives: AutonomousLoopObjective[],
+  objectivePrompt: string | null,
+) {
+  if (!objectivePrompt) {
+    return []
+  }
+
+  return normalizeVerificationCommandCriteria(
+    objectives.find((objective) => objective.prompt === objectivePrompt)?.completionCriteria
+      ?.verificationCommands,
+  )
 }
 
 function updateObjectivesAfterIteration(

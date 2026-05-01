@@ -5,4 +5,4 @@ Apply only `session-routing` in the current session.
 Create a command named `review-markdown` that carries its own `model`, `memory: [command-routing]`, and `permission` metadata.
 Run that command once against `README.md`.
 Call exactly `evolver_write_memory`, `evolver_write_memory`, `evolver_apply_memory`, `evolver_write_command`, and `evolver_run_command` in that order.
-Stop after the command has run.
+Stop after the successful command run leaves the continued session retaining both `session-routing` and `command-routing`.
