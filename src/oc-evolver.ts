@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import { tool, type Plugin } from "@opencode-ai/plugin"
 
@@ -17,10 +18,10 @@ import {
   runCommandInSession,
 } from "./kernel/agent-runtime.ts"
 import {
+  activateAutonomousLoop,
   configureAutonomousLoop,
   getAutonomousLoopStatus,
   runAutonomousIteration,
-  setAutonomousLoopEnabled,
   setAutonomousLoopPaused,
 } from "./kernel/autonomous-loop.ts"
 import { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
@@ -43,6 +44,11 @@ import {
 
 export { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 
+type OCEvolverPluginDependencies = {
+  activateAutonomousLoop?: typeof activateAutonomousLoop
+  runEvaluationScenario?: typeof runEvaluationScenario
+}
+
 type PermissionRequest = {
   type: string
   pattern?: string | string[]
@@ -62,6 +68,17 @@ const BASIC_MEMORY_MUTATION_TOOLS = new Set([
 
 const CONFIG_FILE_NAMES = ["opencode.jsonc", "opencode.json"]
 const CONFIG_PLUGIN_HINTS = ["oc-evolver", "oc-resolver", "github.com/ryodeushii/oc-evolver"]
+const BUNDLED_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
+
+function resolveAutonomousEvaluationRepoRoot(projectWorktree: string, scenarioName: string) {
+  const hasLocalEvalHarness = [
+    join(projectWorktree, "scripts/run-eval.ts"),
+    join(projectWorktree, `eval/scenarios/${scenarioName}.md`),
+    join(projectWorktree, "eval/fixtures/base/.opencode/oc-evolver/registry.json"),
+  ].every((path) => existsSync(path))
+
+  return hasLocalEvalHarness ? projectWorktree : BUNDLED_REPO_ROOT
+}
 
 function resolvePluginFilePath(
   ctx: { directory: string; worktree: string },
@@ -254,12 +271,37 @@ function getToolPermissionType(toolName: string) {
   return null
 }
 
-export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
+function chooseAutonomousRepoRoot(ctx: {
+  directory?: string
+  worktree?: string
+  project: { worktree?: string }
+}) {
+  if (ctx.worktree && ctx.worktree !== "/") {
+    return ctx.worktree
+  }
+
+  if (ctx.project.worktree && ctx.project.worktree !== "/") {
+    return ctx.project.worktree
+  }
+
+  return ctx.directory || ctx.worktree || ctx.project.worktree || "."
+}
+
+export function createOCEvolverPlugin(
+  pluginEntryPointPath?: string,
+  dependencies: OCEvolverPluginDependencies = {},
+): Plugin {
   return async (ctx) => {
     const isDevelopmentWorkspace = isKernelDevelopmentWorkspace(ctx.project.worktree)
+    const autonomousRepoRoot = chooseAutonomousRepoRoot(ctx)
     const pluginFilePath = pluginEntryPointPath
       ? resolveExplicitPluginFilePath(pluginEntryPointPath)
       : resolvePluginFilePath(ctx, isDevelopmentWorkspace)
+    const runLoopEvaluationScenario = ({ repoRoot, scenarioName }: { repoRoot: string; scenarioName: string }) =>
+      (dependencies.runEvaluationScenario ?? runEvaluationScenario)({
+        repoRoot: resolveAutonomousEvaluationRepoRoot(repoRoot, scenarioName),
+        scenarioName,
+      })
 
     await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
 
@@ -462,7 +504,19 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
             intervalMs: tool.schema.number().optional(),
             verificationCommands: tool.schema.array(tool.schema.array(tool.schema.string())).optional(),
             evaluationScenarios: tool.schema.array(tool.schema.string()).optional(),
-            objectivePrompts: tool.schema.array(tool.schema.string()).optional(),
+            failurePolicy: tool.schema.object({
+              maxConsecutiveFailures: tool.schema.number().optional(),
+              escalationAction: tool.schema.enum(["pause_loop", "quarantine_objective"]).optional(),
+            }).optional(),
+            objectives: tool.schema.array(
+              tool.schema.object({
+                prompt: tool.schema.string(),
+                completionCriteria: tool.schema.object({
+                  changedArtifacts: tool.schema.array(tool.schema.string()).optional(),
+                  evaluationScenarios: tool.schema.array(tool.schema.string()).optional(),
+                }),
+              }),
+            ).optional(),
             replaceObjectives: tool.schema.boolean().optional(),
             enabled: tool.schema.boolean().optional(),
             paused: tool.schema.boolean().optional(),
@@ -475,7 +529,8 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
                 intervalMs: args.intervalMs,
                 verificationCommands: args.verificationCommands,
                 evaluationScenarios: args.evaluationScenarios,
-                objectivePrompts: args.objectivePrompts,
+                failurePolicy: args.failurePolicy,
+                objectives: args.objectives,
                 replaceObjectives: args.replaceObjectives,
                 enabled: args.enabled,
                 paused: args.paused,
@@ -486,16 +541,20 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
           },
         }),
         evolver_autonomous_start: tool({
-          description: "Enable autonomous loop scheduling",
+          description: "Activate autonomous loop execution using the configured schedule",
           args: {},
           async execute() {
             return JSON.stringify(
-              await setAutonomousLoopEnabled({
-                pluginFilePath,
-                runtimeContract,
-                enabled: true,
-                paused: false,
-              }),
+              await (dependencies.activateAutonomousLoop ?? activateAutonomousLoop)(
+                {
+                  repoRoot: autonomousRepoRoot,
+                  pluginFilePath,
+                  runtimeContract,
+                },
+                {
+                  runEvaluationScenario: runLoopEvaluationScenario,
+                },
+              ),
               null,
               2,
             )
@@ -517,16 +576,23 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
           },
         }),
         evolver_autonomous_resume: tool({
-          description: "Resume scheduled autonomous loop runs",
+          description: "Activate autonomous loop execution after a pause",
           args: {},
           async execute() {
             return JSON.stringify(
-              await setAutonomousLoopEnabled({
-                pluginFilePath,
-                runtimeContract,
-                enabled: true,
-                paused: false,
-              }),
+              await (dependencies.activateAutonomousLoop ?? activateAutonomousLoop)(
+                {
+                  repoRoot: autonomousRepoRoot,
+                  pluginFilePath,
+                  runtimeContract,
+                },
+                {
+                  runEvaluationScenario: runLoopEvaluationScenario,
+                },
+                {
+                  resumePaused: true,
+                },
+              ),
               null,
               2,
             )
@@ -540,15 +606,11 @@ export function createOCEvolverPlugin(pluginEntryPointPath?: string): Plugin {
           async execute(args) {
             return JSON.stringify(
               await runAutonomousIteration({
-                repoRoot: ctx.project.worktree,
+                repoRoot: autonomousRepoRoot,
                 pluginFilePath,
                 runtimeContract,
                 prompt: args.prompt,
-                runEvaluationScenario: ({ repoRoot, scenarioName }) =>
-                  runEvaluationScenario({
-                    repoRoot,
-                    scenarioName,
-                  }),
+                runEvaluationScenario: runLoopEvaluationScenario,
               }),
               null,
               2,

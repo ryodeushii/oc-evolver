@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
+import { fileURLToPath } from "node:url"
 
 import { OCEvolverPlugin } from "../../src/oc-evolver.ts"
 
@@ -84,6 +85,534 @@ describe("plugin tool surface", () => {
 
     expect(hooks.tool?.evolver_apply_memory?.description).toContain("memory profile")
     expect(hooks.tool?.evolver_rollback?.description).toContain("Rollback")
+  })
+
+  test("autonomous start and resume activate the loop instead of only flipping persisted state", async () => {
+    const activationCalls: Array<Record<string, unknown>> = []
+    const activationDependencies: Array<Record<string, unknown>> = []
+    const activationOptions: Array<Record<string, unknown> | undefined> = []
+    const pluginModule = await import("../../src/oc-evolver.ts")
+
+    const hooks = await (pluginModule.createOCEvolverPlugin as any)(undefined, {
+      activateAutonomousLoop: async (
+        input: Record<string, unknown>,
+        dependencyOverrides: Record<string, unknown>,
+        options?: Record<string, unknown>,
+      ) => {
+        activationCalls.push(input)
+        activationDependencies.push(dependencyOverrides)
+        activationOptions.push(options)
+
+        return {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 60_000,
+            verificationCommands: [["bun", "run", "typecheck"]],
+            evaluationScenarios: ["autonomous-run"],
+          },
+          lastSessionID: null,
+          latestLearning: null,
+          objectives: [],
+          iterations: [],
+          activation: {
+            mode: "worker",
+          },
+          iteration: null,
+        }
+      },
+    })({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    const toolCtx = {
+      sessionID: "session-autonomous-control",
+      messageID: "message-1",
+      agent: "main",
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      abort: new AbortController().signal,
+      metadata() {},
+      ask() {
+        throw new Error("not implemented")
+      },
+    }
+
+    const start = JSON.parse(await hooks.tool.evolver_autonomous_start.execute({}, toolCtx))
+    const resume = JSON.parse(await hooks.tool.evolver_autonomous_resume.execute({}, toolCtx))
+
+    expect(activationCalls).toHaveLength(2)
+    expect(activationCalls[0]).toMatchObject({
+      repoRoot: workspaceRoot,
+    })
+    expect(typeof activationDependencies[0]?.runEvaluationScenario).toBe("function")
+    expect(typeof activationDependencies[1]?.runEvaluationScenario).toBe("function")
+    expect(activationOptions[0]).toEqual(undefined)
+    expect(activationOptions[1]).toMatchObject({
+      resumePaused: true,
+    })
+    expect(hooks.tool.evolver_autonomous_start.description).toContain("Activate")
+    expect(hooks.tool.evolver_autonomous_resume.description).toContain("Activate")
+    expect(start.config.enabled).toBe(true)
+    expect(start.activation.mode).toBe("worker")
+    expect(resume.activation.mode).toBe("worker")
+  })
+
+  test("autonomous evaluation runner falls back to the bundled eval harness when the worktree lacks one", async () => {
+    const repoRoot = fileURLToPath(new URL("../../", import.meta.url)).replace(/\/$/, "")
+    let evaluationInvocation: Record<string, unknown> | null = null
+    const pluginModule = await import("../../src/oc-evolver.ts")
+
+    const hooks = await (pluginModule.createOCEvolverPlugin as any)(undefined, {
+      activateAutonomousLoop: async (
+        _input: Record<string, unknown>,
+        dependencyOverrides: Record<string, unknown>,
+      ) => {
+        const runEvaluationScenario = dependencyOverrides.runEvaluationScenario as (input: {
+          repoRoot: string
+          scenarioName: string
+        }) => Promise<unknown>
+
+        await runEvaluationScenario({
+          repoRoot: workspaceRoot,
+          scenarioName: "smoke",
+        })
+
+        return {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 0,
+            verificationCommands: [],
+            evaluationScenarios: ["smoke"],
+            failurePolicy: {
+              maxConsecutiveFailures: 3,
+              escalationAction: "pause_loop",
+              lastEscalationReason: null,
+            },
+          },
+          lastSessionID: null,
+          latestLearning: null,
+          objectives: [],
+          iterations: [],
+          activation: {
+            mode: "inline",
+          },
+          iteration: null,
+        }
+      },
+      runEvaluationScenario: async (input: Record<string, unknown>) => {
+        evaluationInvocation = input
+
+        return {
+          scenarioName: input.scenarioName,
+          resultDir: join(repoRoot, "eval/results/smoke/fake"),
+          workspaceRoot,
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+          changedFiles: [],
+        }
+      },
+    })({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool.evolver_autonomous_start.execute(
+      {},
+      {
+        sessionID: "session-autonomous-eval",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(evaluationInvocation).toMatchObject({
+      repoRoot,
+      scenarioName: "smoke",
+    })
+  })
+
+  test("autonomous evaluation runner falls back to the bundled eval harness when the requested scenario is missing locally", async () => {
+    const repoRoot = fileURLToPath(new URL("../../", import.meta.url)).replace(/\/$/, "")
+    const localHarnessRoot = join(workspaceRoot, "local-harness")
+    let evaluationInvocation: Record<string, unknown> | null = null
+    const pluginModule = await import("../../src/oc-evolver.ts")
+
+    await mkdir(join(localHarnessRoot, "scripts"), { recursive: true })
+    await mkdir(join(localHarnessRoot, "eval/scenarios"), { recursive: true })
+    await mkdir(join(localHarnessRoot, "eval/fixtures/base/.opencode/oc-evolver"), { recursive: true })
+    await writeFile(join(localHarnessRoot, "scripts/run-eval.ts"), "export {}\n")
+    await writeFile(join(localHarnessRoot, "eval/scenarios/smoke.md"), "Smoke scenario.\n")
+    await writeFile(
+      join(localHarnessRoot, "eval/fixtures/base/.opencode/oc-evolver/registry.json"),
+      "{}\n",
+    )
+
+    const hooks = await (pluginModule.createOCEvolverPlugin as any)(undefined, {
+      activateAutonomousLoop: async (
+        _input: Record<string, unknown>,
+        dependencyOverrides: Record<string, unknown>,
+      ) => {
+        const runEvaluationScenario = dependencyOverrides.runEvaluationScenario as (input: {
+          repoRoot: string
+          scenarioName: string
+        }) => Promise<unknown>
+
+        await runEvaluationScenario({
+          repoRoot: localHarnessRoot,
+          scenarioName: "objective-memory-evidence",
+        })
+
+        return {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 0,
+            verificationCommands: [],
+            evaluationScenarios: ["smoke"],
+            failurePolicy: {
+              maxConsecutiveFailures: 3,
+              escalationAction: "pause_loop",
+              lastEscalationReason: null,
+            },
+          },
+          lastSessionID: null,
+          latestLearning: null,
+          objectives: [],
+          iterations: [],
+          activation: {
+            mode: "inline",
+          },
+          iteration: null,
+        }
+      },
+      runEvaluationScenario: async (input: Record<string, unknown>) => {
+        evaluationInvocation = input
+
+        return {
+          scenarioName: input.scenarioName,
+          resultDir: join(repoRoot, "eval/results/objective-memory-evidence/fake"),
+          workspaceRoot,
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+          changedFiles: [],
+        }
+      },
+    })({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: localHarnessRoot,
+      },
+      directory: localHarnessRoot,
+      worktree: localHarnessRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool.evolver_autonomous_start.execute(
+      {},
+      {
+        sessionID: "session-autonomous-missing-scenario",
+        messageID: "message-1",
+        agent: "main",
+        directory: localHarnessRoot,
+        worktree: localHarnessRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(evaluationInvocation).toMatchObject({
+      repoRoot,
+      scenarioName: "objective-memory-evidence",
+    })
+  })
+
+  test("autonomous tool entrypoints prefer the active worktree when project worktree points at root", async () => {
+    const activationCalls: Array<Record<string, unknown>> = []
+    const pluginModule = await import("../../src/oc-evolver.ts")
+
+    const hooks = await (pluginModule.createOCEvolverPlugin as any)(undefined, {
+      activateAutonomousLoop: async (input: Record<string, unknown>) => {
+        activationCalls.push(input)
+
+        return {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 0,
+            verificationCommands: [],
+            evaluationScenarios: [],
+            failurePolicy: {
+              maxConsecutiveFailures: 3,
+              escalationAction: "pause_loop",
+              lastEscalationReason: null,
+            },
+          },
+          lastSessionID: null,
+          latestLearning: null,
+          objectives: [],
+          iterations: [],
+          activation: {
+            mode: "inline",
+          },
+          iteration: {
+            decision: "no_pending_revision",
+            sessionID: null,
+            pendingRevisionID: null,
+            promotedRevisionID: null,
+            rejectionReason: null,
+          },
+        }
+      },
+    })({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: "/",
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool.evolver_autonomous_start.execute(
+      {},
+      {
+        sessionID: "session-autonomous-root-fallback",
+        messageID: "message-root-fallback",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(activationCalls).toHaveLength(1)
+    expect(activationCalls[0]).toMatchObject({
+      repoRoot: workspaceRoot,
+    })
+  })
+
+  test("autonomous tool entrypoints prefer the active directory when worktree resolves to root", async () => {
+    const activationCalls: Array<Record<string, unknown>> = []
+    const pluginModule = await import("../../src/oc-evolver.ts")
+
+    const hooks = await (pluginModule.createOCEvolverPlugin as any)(undefined, {
+      activateAutonomousLoop: async (input: Record<string, unknown>) => {
+        activationCalls.push(input)
+
+        return {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 0,
+            verificationCommands: [],
+            evaluationScenarios: [],
+            failurePolicy: {
+              maxConsecutiveFailures: 3,
+              escalationAction: "pause_loop",
+              lastEscalationReason: null,
+            },
+          },
+          lastSessionID: null,
+          latestLearning: null,
+          objectives: [],
+          iterations: [],
+          activation: {
+            mode: "inline",
+          },
+          iteration: {
+            decision: "no_pending_revision",
+            sessionID: null,
+            pendingRevisionID: null,
+            promotedRevisionID: null,
+            rejectionReason: null,
+          },
+        }
+      },
+    })({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: "/",
+      },
+      directory: workspaceRoot,
+      worktree: "/",
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool.evolver_autonomous_start.execute(
+      {},
+      {
+        sessionID: "session-autonomous-directory-fallback",
+        messageID: "message-directory-fallback",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: "/",
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(activationCalls).toHaveLength(1)
+    expect(activationCalls[0]).toMatchObject({
+      repoRoot: workspaceRoot,
+    })
+  })
+
+  test("autonomous tool entrypoints keep the project worktree when directory is nested inside it", async () => {
+    const activationCalls: Array<Record<string, unknown>> = []
+    const pluginModule = await import("../../src/oc-evolver.ts")
+    const nestedDirectory = join(workspaceRoot, "nested")
+
+    await mkdir(nestedDirectory, { recursive: true })
+
+    const hooks = await (pluginModule.createOCEvolverPlugin as any)(undefined, {
+      activateAutonomousLoop: async (input: Record<string, unknown>) => {
+        activationCalls.push(input)
+
+        return {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 0,
+            verificationCommands: [],
+            evaluationScenarios: [],
+            failurePolicy: {
+              maxConsecutiveFailures: 3,
+              escalationAction: "pause_loop",
+              lastEscalationReason: null,
+            },
+          },
+          lastSessionID: null,
+          latestLearning: null,
+          objectives: [],
+          iterations: [],
+          activation: {
+            mode: "inline",
+          },
+          iteration: {
+            decision: "no_pending_revision",
+            sessionID: null,
+            pendingRevisionID: null,
+            promotedRevisionID: null,
+            rejectionReason: null,
+          },
+        }
+      },
+    })({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: nestedDirectory,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool.evolver_autonomous_start.execute(
+      {},
+      {
+        sessionID: "session-autonomous-nested-directory",
+        messageID: "message-nested-directory",
+        agent: "main",
+        directory: nestedDirectory,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(activationCalls).toHaveLength(1)
+    expect(activationCalls[0]).toMatchObject({
+      repoRoot: workspaceRoot,
+    })
   })
 
   test("package root exposes the plugin server entrypoint", async () => {

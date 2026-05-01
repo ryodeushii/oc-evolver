@@ -24,6 +24,31 @@ describe("task 1 scaffold", () => {
 
   test("freezes the local runtime contract", () => {
     expect(runtimeContract.opencodeVersion).toBe("1.14.29")
+    expect(runtimeContract.runFlags).toEqual([
+      "--command",
+      "--continue",
+      "--session",
+      "--fork",
+      "--share",
+      "--model",
+      "--agent",
+      "--format",
+      "--file",
+      "--attach",
+      "--password",
+      "--dir",
+      "--port",
+      "--variant",
+      "--thinking",
+      "--dangerously-skip-permissions",
+    ])
+    expect(runtimeContract.agentCreateFlags).toEqual([
+      "--path",
+      "--description",
+      "--mode",
+      "--permissions",
+      "--model",
+    ])
     expect(runtimeContract.nativeAgentDir).toBe("agent")
     expect(runtimeContract.pluginDir).toBe(".opencode/plugins")
     expect(runtimeContract.skillDir).toBe(".opencode/skills")

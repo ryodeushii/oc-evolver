@@ -9,6 +9,38 @@ import {
   type EvalCommandResult,
 } from "../../scripts/run-eval.ts"
 
+const AUTONOMOUS_RUN_OBJECTIVE_PROMPT =
+  'Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.'
+const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
+  intervalMs: 0,
+  verificationCommands: [],
+  evaluationScenarios: ["smoke"],
+  failurePolicy: {
+    maxConsecutiveFailures: 3,
+    escalationAction: "pause_loop",
+  },
+  objectives: [
+    {
+      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+      completionCriteria: {
+        changedArtifacts: ["memory:autonomous-evidence-memory"],
+        evaluationScenarios: ["objective-memory-evidence"],
+      },
+    },
+  ],
+  replaceObjectives: true,
+  enabled: true,
+  paused: false,
+} as const
+
+function buildToolEvent(tool: string, sessionID: string, input?: unknown) {
+  return JSON.stringify(
+    input === undefined
+      ? { type: "tool", tool, sessionID }
+      : { type: "tool", tool, sessionID, state: { input } },
+  )
+}
+
 describe("evaluation scenarios", () => {
   let repoRoot: string
 
@@ -316,72 +348,142 @@ describe("evaluation scenarios", () => {
   test("autonomous-run scenario is part of the default sweep and captures loop state artifacts", async () => {
     await writeFile(
       join(repoRoot, "eval/scenarios/autonomous-run.md"),
-      "Run one autonomous improvement loop and leave the registry promoted with persisted learning.\n",
+      await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
     )
+
+    await writeFile(
+      join(repoRoot, "eval/scenarios/objective-memory-evidence.md"),
+      await readFile(new URL("../../eval/scenarios/objective-memory-evidence.md", import.meta.url), "utf8"),
+    )
+
+    let executionCount = 0
 
     const result = await runEvaluationScenario({
       repoRoot,
       scenarioName: "autonomous-run",
       timestamp: "2026-04-30T14-15-00.000Z",
-      executeCommand: async ({ workspaceRoot }) => {
-        await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
-        await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
-        await writeFile(
-          join(workspaceRoot, ".opencode/commands/autonomous-review.md"),
-          "---\ndescription: Autonomous review flow\n---\n\nReview README.md once.\n",
-        )
-        await writeFile(
-          join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
-          JSON.stringify(
-            {
-              lastSessionID: "ses-auto-1",
-              latestLearning: {
-                summary: "The last autonomous iteration was promoted at revision rev-auto-1.",
-                remainingObjectives: [],
-              },
-              objectives: [],
-              iterations: [
-                {
-                  decision: "promoted",
-                  changedArtifacts: ["command:autonomous-review"],
+      executeCommand: async ({ workspaceRoot, prompt }) => {
+        executionCount += 1
+
+        if (executionCount === 1) {
+          await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+          await writeFile(
+            join(workspaceRoot, ".opencode/memory/autonomous-evidence-memory.md"),
+            "---\nname: autonomous-evidence-memory\ndescription: Evidence fixture for autonomous eval coverage.\n---\n\n# Autonomous Evidence Memory\n\nThis artifact exists to verify autonomous completion evidence and promotion behavior.\n",
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+            JSON.stringify(
+              {
+                config: {
+                  enabled: true,
+                  paused: false,
+                  intervalMs: 0,
+                  verificationCommands: [],
+                  evaluationScenarios: ["smoke"],
+                  failurePolicy: {
+                    maxConsecutiveFailures: 3,
+                    escalationAction: "pause_loop",
+                    lastEscalationReason: null,
+                  },
                 },
-              ],
-            },
-            null,
-            2,
-          ),
-        )
-        await writeFile(
-          join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
-          JSON.stringify(
-            {
-              skills: {},
-              agents: {},
-              commands: {
-                "autonomous-review": {
-                  kind: "command",
-                  name: "autonomous-review",
-                  nativePath: ".opencode/commands/autonomous-review.md",
-                  revisionID: "rev-auto-1",
-                  contentHash: "a".repeat(64),
+                lastSessionID: "ses-auto-1",
+                latestLearning: {
+                  summary: "The last autonomous iteration was promoted at revision rev-auto-1.",
+                  remainingObjectives: [],
                 },
+                objectives: [
+                  {
+                    prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                    status: "completed",
+                    completionCriteria: {
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluationScenarios: ["objective-memory-evidence"],
+                    },
+                    lastCompletionEvidence: {
+                      satisfied: true,
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                      missingChangedArtifacts: [],
+                      missingEvaluationScenarios: [],
+                      checkedAt: new Date(0).toISOString(),
+                    },
+                    attempts: 1,
+                    consecutiveFailures: 0,
+                    updatedAt: new Date(0).toISOString(),
+                    lastSessionID: "ses-auto-1",
+                    lastDecision: "promoted",
+                    lastEscalationReason: null,
+                  },
+                ],
+                iterations: [
+                  {
+                    decision: "promoted",
+                    changedArtifacts: ["memory:autonomous-evidence-memory"],
+                    evaluations: [
+                      {
+                        scenarioName: "smoke",
+                        exitCode: 0,
+                      },
+                      {
+                        scenarioName: "objective-memory-evidence",
+                        exitCode: 0,
+                      },
+                    ],
+                  },
+                ],
               },
-              memories: {},
-              quarantine: {},
-              currentRevision: "rev-auto-1",
-              pendingRevision: null,
-            },
-            null,
-            2,
-          ),
-        )
-        await writeFile(
-          join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-          '{"action":"promote","status":"success","revisionID":"rev-auto-1"}\n',
-        )
+              null,
+              2,
+            ),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify(
+              {
+                skills: {},
+                agents: {},
+                commands: {},
+                memories: {
+                  "autonomous-evidence-memory": {
+                    kind: "memory",
+                    name: "autonomous-evidence-memory",
+                    nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                    revisionID: "rev-auto-1",
+                    contentHash: "a".repeat(64),
+                  },
+                },
+                quarantine: {},
+                currentRevision: "rev-auto-1",
+                pendingRevision: null,
+              },
+              null,
+              2,
+            ),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            '{"action":"promote","status":"success","revisionID":"rev-auto-1"}\n',
+          )
+
+          return {
+            stdout: [
+                buildToolEvent("evolver_autonomous_configure", "ses-auto-1", AUTONOMOUS_RUN_CONFIGURE_INPUT),
+                buildToolEvent("evolver_autonomous_start", "ses-auto-1", {}),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        }
+
+        expect(prompt).toContain("Turn 2")
 
         return {
-          stdout: '{"type":"text","text":"autonomous run ok","sessionID":"ses-auto-1"}',
+          stdout: [
+            '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-auto-1"}',
+            '{"type":"tool","tool":"evolver_status","sessionID":"ses-auto-1"}',
+          ].join("\n"),
           stderr: "",
           exitCode: 0,
         } satisfies EvalCommandResult
@@ -390,10 +492,805 @@ describe("evaluation scenarios", () => {
 
     const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
       changedFiles: string[]
+      turnCount: number
     }
-
+    const turns = JSON.parse(await readFile(join(result.resultDir, "turns.json"), "utf8")) as Array<{
+      sessionID: string | null
+    }>
+     
     expect(DEFAULT_SCENARIOS).toContain("autonomous-run")
+    expect(resultJson.turnCount).toBe(2)
     expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/autonomous-loop.json")
-    expect(resultJson.changedFiles).toContain(".opencode/commands/autonomous-review.md")
+    expect(resultJson.changedFiles).toContain(".opencode/memory/autonomous-evidence-memory.md")
+    expect(turns).toHaveLength(2)
+    expect(turns[0]?.sessionID).toBe("ses-auto-1")
+    expect(turns[1]?.sessionID).toBe("ses-auto-1")
+  })
+
+  test("autonomous-run scenario rejects promoted-looking results that lack explicit completion evidence", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-run.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
+    )
+
+    let executionCount = 0
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-run",
+        timestamp: "2026-04-30T14-16-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          executionCount += 1
+
+          if (executionCount === 1) {
+            await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+              JSON.stringify(
+                {
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                    failurePolicy: {
+                      maxConsecutiveFailures: 3,
+                      escalationAction: "pause_loop",
+                      lastEscalationReason: null,
+                    },
+                  },
+                  lastSessionID: "ses-auto-2",
+                  latestLearning: {
+                    summary: "The last autonomous iteration was promoted at revision rev-auto-2.",
+                    remainingObjectives: [],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "pending",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                      },
+                      lastCompletionEvidence: null,
+                      attempts: 1,
+                      consecutiveFailures: 0,
+                      updatedAt: new Date(0).toISOString(),
+                      lastSessionID: "ses-auto-2",
+                      lastDecision: "promoted",
+                      lastEscalationReason: null,
+                    },
+                  ],
+                  iterations: [
+                    {
+                      decision: "promoted",
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluations: [
+                        {
+                          scenarioName: "smoke",
+                          exitCode: 0,
+                        },
+                      ],
+                    },
+                  ],
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {},
+                  quarantine: {},
+                  currentRevision: "rev-auto-2",
+                  pendingRevision: null,
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              '{"action":"promote","status":"success","revisionID":"rev-auto-2"}\n',
+            )
+
+            return {
+              stdout: [
+                buildToolEvent("evolver_autonomous_configure", "ses-auto-2", AUTONOMOUS_RUN_CONFIGURE_INPUT),
+                buildToolEvent("evolver_autonomous_start", "ses-auto-2", {}),
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: [
+              '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-auto-2"}',
+              '{"type":"tool","tool":"evolver_status","sessionID":"ses-auto-2"}',
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/queued objective|completion evidence/i)
+  })
+
+  test("autonomous-run scenario rejects runs with the wrong configure payload", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-run.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
+    )
+
+    let executionCount = 0
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-run",
+        timestamp: "2026-04-30T14-16-30.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          executionCount += 1
+
+          if (executionCount === 1) {
+            await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+            await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+            await writeFile(
+              join(workspaceRoot, ".opencode/memory/autonomous-evidence-memory.md"),
+              "---\nname: autonomous-evidence-memory\ndescription: Evidence fixture for autonomous eval coverage.\n---\n\n# Autonomous Evidence Memory\n",
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+              JSON.stringify(
+                {
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                    failurePolicy: {
+                      maxConsecutiveFailures: 3,
+                      escalationAction: "pause_loop",
+                      lastEscalationReason: null,
+                    },
+                  },
+                  lastSessionID: "ses-auto-2b",
+                  latestLearning: {
+                    summary: "The last autonomous iteration was promoted at revision rev-auto-2b.",
+                    remainingObjectives: [],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "completed",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                      },
+                      lastCompletionEvidence: {
+                        satisfied: true,
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        missingChangedArtifacts: [],
+                        missingEvaluationScenarios: [],
+                        checkedAt: new Date(0).toISOString(),
+                      },
+                      attempts: 1,
+                      consecutiveFailures: 0,
+                      updatedAt: new Date(0).toISOString(),
+                      lastSessionID: "ses-auto-2b",
+                      lastDecision: "promoted",
+                      lastEscalationReason: null,
+                    },
+                  ],
+                  iterations: [
+                    {
+                      decision: "promoted",
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluations: [
+                        { scenarioName: "smoke", exitCode: 0 },
+                        { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                    },
+                  ],
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {
+                    "autonomous-evidence-memory": {
+                      kind: "memory",
+                      name: "autonomous-evidence-memory",
+                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                      revisionID: "rev-auto-2b",
+                      contentHash: "ab".repeat(32),
+                    },
+                  },
+                  quarantine: {},
+                  currentRevision: "rev-auto-2b",
+                  pendingRevision: null,
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              '{"action":"promote","status":"success","revisionID":"rev-auto-2b"}\n',
+            )
+
+            return {
+              stdout: [
+                buildToolEvent("evolver_autonomous_configure", "ses-auto-2b", {
+                  ...AUTONOMOUS_RUN_CONFIGURE_INPUT,
+                  verificationCommands: [["bun", "run", "typecheck"]],
+                }),
+                buildToolEvent("evolver_autonomous_start", "ses-auto-2b", {}),
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: [
+              buildToolEvent("evolver_autonomous_status", "ses-auto-2b", {}),
+              buildToolEvent("evolver_status", "ses-auto-2b", {}),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/configure payload/i)
+  })
+
+  test("autonomous-run scenario rejects runs that skip the required turn-2 status reads", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-run.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
+    )
+
+    let executionCount = 0
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-run",
+        timestamp: "2026-04-30T14-18-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          executionCount += 1
+
+          if (executionCount === 1) {
+            await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+            await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+            await writeFile(
+              join(workspaceRoot, ".opencode/memory/autonomous-evidence-memory.md"),
+              "---\nname: autonomous-evidence-memory\ndescription: Evidence fixture for autonomous eval coverage.\n---\n\n# Autonomous Evidence Memory\n",
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+              JSON.stringify(
+                {
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                    failurePolicy: {
+                      maxConsecutiveFailures: 3,
+                      escalationAction: "pause_loop",
+                      lastEscalationReason: null,
+                    },
+                  },
+                  lastSessionID: "ses-auto-3",
+                  latestLearning: {
+                    summary: "The last autonomous iteration was promoted at revision rev-auto-3.",
+                    remainingObjectives: [],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "completed",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                      },
+                      lastCompletionEvidence: {
+                        satisfied: true,
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        missingChangedArtifacts: [],
+                        missingEvaluationScenarios: [],
+                        checkedAt: new Date(0).toISOString(),
+                      },
+                      attempts: 1,
+                      consecutiveFailures: 0,
+                      updatedAt: new Date(0).toISOString(),
+                      lastSessionID: "ses-auto-3",
+                      lastDecision: "promoted",
+                      lastEscalationReason: null,
+                    },
+                  ],
+                  iterations: [
+                    {
+                      decision: "promoted",
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluations: [
+                        { scenarioName: "smoke", exitCode: 0 },
+                        { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                    },
+                  ],
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {
+                    "autonomous-evidence-memory": {
+                      kind: "memory",
+                      name: "autonomous-evidence-memory",
+                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                      revisionID: "rev-auto-3",
+                      contentHash: "a".repeat(64),
+                    },
+                  },
+                  quarantine: {},
+                  currentRevision: "rev-auto-3",
+                  pendingRevision: null,
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              '{"action":"promote","status":"success","revisionID":"rev-auto-3"}\n',
+            )
+
+            return {
+              stdout: [
+                buildToolEvent("evolver_autonomous_configure", "ses-auto-3", AUTONOMOUS_RUN_CONFIGURE_INPUT),
+                buildToolEvent("evolver_autonomous_start", "ses-auto-3", {}),
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: '{"type":"text","text":"looks good","sessionID":"ses-auto-3"}',
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/turn-2 status/i)
+  })
+
+  test("autonomous-run scenario rejects runs that execute extra tools in turn 2", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-run.md"),
+      await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
+    )
+
+    let executionCount = 0
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-run",
+        timestamp: "2026-04-30T14-20-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          executionCount += 1
+
+          if (executionCount === 1) {
+            await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+            await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+            await writeFile(
+              join(workspaceRoot, ".opencode/memory/autonomous-evidence-memory.md"),
+              "---\nname: autonomous-evidence-memory\ndescription: Evidence fixture for autonomous eval coverage.\n---\n\n# Autonomous Evidence Memory\n",
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+              JSON.stringify(
+                {
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                    failurePolicy: {
+                      maxConsecutiveFailures: 3,
+                      escalationAction: "pause_loop",
+                      lastEscalationReason: null,
+                    },
+                  },
+                  lastSessionID: "ses-auto-4",
+                  latestLearning: {
+                    summary: "The last autonomous iteration was promoted at revision rev-auto-4.",
+                    remainingObjectives: [],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "completed",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                      },
+                      lastCompletionEvidence: {
+                        satisfied: true,
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        missingChangedArtifacts: [],
+                        missingEvaluationScenarios: [],
+                        checkedAt: new Date(0).toISOString(),
+                      },
+                      attempts: 1,
+                      consecutiveFailures: 0,
+                      updatedAt: new Date(0).toISOString(),
+                      lastSessionID: "ses-auto-4",
+                      lastDecision: "promoted",
+                      lastEscalationReason: null,
+                    },
+                  ],
+                  iterations: [
+                    {
+                      decision: "promoted",
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluations: [
+                        { scenarioName: "smoke", exitCode: 0 },
+                        { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                    },
+                  ],
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {
+                    "autonomous-evidence-memory": {
+                      kind: "memory",
+                      name: "autonomous-evidence-memory",
+                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                      revisionID: "rev-auto-4",
+                      contentHash: "b".repeat(64),
+                    },
+                  },
+                  quarantine: {},
+                  currentRevision: "rev-auto-4",
+                  pendingRevision: null,
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              '{"action":"promote","status":"success","revisionID":"rev-auto-4"}\n',
+            )
+
+            return {
+              stdout: [
+                buildToolEvent("evolver_autonomous_configure", "ses-auto-4", AUTONOMOUS_RUN_CONFIGURE_INPUT),
+                buildToolEvent("evolver_autonomous_start", "ses-auto-4", {}),
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: [
+              '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-auto-4"}',
+              '{"type":"tool","tool":"evolver_status","sessionID":"ses-auto-4"}',
+              '{"type":"tool","tool":"evolver_write_memory","sessionID":"ses-auto-4"}',
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/turn-2 status-only path|mutating tool/i)
+  })
+
+  test("autonomous-run scenario rejects runs that add an unexpected third turn", async () => {
+    const autonomousRunPrompt = await readFile(
+      new URL("../../eval/scenarios/autonomous-run.md", import.meta.url),
+      "utf8",
+    )
+
+    await writeFile(
+      join(repoRoot, "eval/scenarios/autonomous-run.md"),
+      `${autonomousRunPrompt}\n\n---\n\nTurn 3:\n\nSay \"extra turn\".`,
+    )
+
+    let executionCount = 0
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "autonomous-run",
+        timestamp: "2026-04-30T14-22-00.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          executionCount += 1
+
+          if (executionCount === 1) {
+            await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+            await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+            await writeFile(
+              join(workspaceRoot, ".opencode/memory/autonomous-evidence-memory.md"),
+              "---\nname: autonomous-evidence-memory\ndescription: Evidence fixture for autonomous eval coverage.\n---\n\n# Autonomous Evidence Memory\n",
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+              JSON.stringify(
+                {
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 0,
+                    verificationCommands: [],
+                    evaluationScenarios: ["smoke"],
+                    failurePolicy: {
+                      maxConsecutiveFailures: 3,
+                      escalationAction: "pause_loop",
+                      lastEscalationReason: null,
+                    },
+                  },
+                  lastSessionID: "ses-auto-5",
+                  latestLearning: {
+                    summary: "The last autonomous iteration was promoted at revision rev-auto-5.",
+                    remainingObjectives: [],
+                  },
+                  objectives: [
+                    {
+                      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                      status: "completed",
+                      completionCriteria: {
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        evaluationScenarios: ["objective-memory-evidence"],
+                      },
+                      lastCompletionEvidence: {
+                        satisfied: true,
+                        changedArtifacts: ["memory:autonomous-evidence-memory"],
+                        passedEvaluationScenarios: ["objective-memory-evidence", "smoke"],
+                        missingChangedArtifacts: [],
+                        missingEvaluationScenarios: [],
+                        checkedAt: new Date(0).toISOString(),
+                      },
+                      attempts: 1,
+                      consecutiveFailures: 0,
+                      updatedAt: new Date(0).toISOString(),
+                      lastSessionID: "ses-auto-5",
+                      lastDecision: "promoted",
+                      lastEscalationReason: null,
+                    },
+                  ],
+                  iterations: [
+                    {
+                      decision: "promoted",
+                      changedArtifacts: ["memory:autonomous-evidence-memory"],
+                      evaluations: [
+                        { scenarioName: "smoke", exitCode: 0 },
+                        { scenarioName: "objective-memory-evidence", exitCode: 0 },
+                      ],
+                    },
+                  ],
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {
+                    "autonomous-evidence-memory": {
+                      kind: "memory",
+                      name: "autonomous-evidence-memory",
+                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                      revisionID: "rev-auto-5",
+                      contentHash: "c".repeat(64),
+                    },
+                  },
+                  quarantine: {},
+                  currentRevision: "rev-auto-5",
+                  pendingRevision: null,
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              '{"action":"promote","status":"success","revisionID":"rev-auto-5"}\n',
+            )
+
+            return {
+              stdout: [
+                buildToolEvent("evolver_autonomous_configure", "ses-auto-5", AUTONOMOUS_RUN_CONFIGURE_INPUT),
+                buildToolEvent("evolver_autonomous_start", "ses-auto-5", {}),
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          if (executionCount === 2) {
+            return {
+              stdout: [
+                '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-auto-5"}',
+                '{"type":"tool","tool":"evolver_status","sessionID":"ses-auto-5"}',
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: '{"type":"text","text":"extra turn","sessionID":"ses-auto-5"}',
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/exactly 2 turns/i)
+  })
+
+  test("objective-memory-evidence scenario rejects runs that skip the required status reads", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/objective-memory-evidence.md"),
+      await readFile(new URL("../../eval/scenarios/objective-memory-evidence.md", import.meta.url), "utf8"),
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "objective-memory-evidence",
+        timestamp: "2026-04-30T14-17-00.000Z",
+        executeCommand: async () => {
+          return {
+            stdout: '{"type":"text","text":"ok","sessionID":"ses-objective-1"}',
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/status-only|status.*read/i)
+  })
+
+  test("objective-memory-evidence scenario rejects runs that execute mutating tools", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/objective-memory-evidence.md"),
+      await readFile(new URL("../../eval/scenarios/objective-memory-evidence.md", import.meta.url), "utf8"),
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "objective-memory-evidence",
+        timestamp: "2026-04-30T14-19-00.000Z",
+        executeCommand: async () => {
+          return {
+            stdout: [
+              '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-2"}',
+              '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-2"}',
+              '{"type":"tool","tool":"evolver_write_memory","sessionID":"ses-objective-2"}',
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/status-only|mutating tool/i)
+  })
+
+  test("objective-memory-evidence scenario rejects runs that execute non-evolver mutating tools", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/objective-memory-evidence.md"),
+      await readFile(new URL("../../eval/scenarios/objective-memory-evidence.md", import.meta.url), "utf8"),
+    )
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "objective-memory-evidence",
+        timestamp: "2026-04-30T14-21-00.000Z",
+        executeCommand: async () => {
+          return {
+            stdout: [
+              '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-3"}',
+              '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-3"}',
+              '{"type":"tool","tool":"apply_patch","sessionID":"ses-objective-3"}',
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/status-only/i)
+  })
+
+  test("objective-memory-evidence scenario rejects runs that add an unexpected second turn", async () => {
+    const objectivePrompt = await readFile(
+      new URL("../../eval/scenarios/objective-memory-evidence.md", import.meta.url),
+      "utf8",
+    )
+
+    await writeFile(
+      join(repoRoot, "eval/scenarios/objective-memory-evidence.md"),
+      `${objectivePrompt}\n\n---\n\nTurn 2:\n\nSay \"extra turn\".`,
+    )
+
+    let executionCount = 0
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "objective-memory-evidence",
+        timestamp: "2026-04-30T14-22-30.000Z",
+        executeCommand: async () => {
+          executionCount += 1
+
+          if (executionCount === 1) {
+            return {
+              stdout: [
+                '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-4"}',
+                '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-4"}',
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: '{"type":"text","text":"extra turn","sessionID":"ses-objective-4"}',
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        },
+      }),
+    ).rejects.toThrow(/exactly 1 turn/i)
   })
 })

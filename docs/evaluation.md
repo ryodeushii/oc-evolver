@@ -110,17 +110,37 @@ Key files:
 - Expected artifact signal:
   - `.opencode/memory/artifact-only-session.md`
   - persisted session state under `.opencode/oc-evolver/sessions/`
-- `audit.ndjson` contains `write_memory`, `apply_memory`, and `policy_denied`
-- the blocked Basic Memory write leaves no durable note artifact in the fixture workspace
+  - `audit.ndjson` contains `write_memory`, `apply_memory`, and `policy_denied`
+  - the blocked Basic Memory write leaves no durable note artifact in the fixture workspace
 
 ### `autonomous-run`
 
 - Runs one persisted autonomous-loop iteration against a queued objective
+- Expected control-flow proof:
+  - turn 1 executes exactly `evolver_autonomous_configure` then `evolver_autonomous_start`
+  - turn 1 does not use `evolver_autonomous_run` or outer-session mutating tools
+  - turn 2 executes exactly `evolver_autonomous_status` then `evolver_status`
 - Expected artifact signal:
   - `.opencode/oc-evolver/autonomous-loop.json`
   - `audit.ndjson` contains `promote`
   - `registry.json.currentRevision` is non-null
+  - the latest autonomous iteration records `decision: "promoted"`
+  - the first queued objective finishes with `status: "completed"`
+  - `lastCompletionEvidence.satisfied` is `true`
+  - `lastCompletionEvidence.changedArtifacts` contains the required mutable artifact
+  - `lastCompletionEvidence.passedEvaluationScenarios` contains both the baseline and objective-specific scenarios
   - `autonomous-loop.json.latestLearning.summary` describes a promoted iteration
+
+### `objective-memory-evidence`
+
+- Runs exactly one nested objective-evaluation turn as a status-only proof helper for `autonomous-run`
+- Expected control-flow proof:
+  - the scenario executes exactly one turn
+  - it calls exactly `evolver_autonomous_status` and then `evolver_status`
+  - it does not call any other tools or leave durable file changes
+- Artifact note:
+  - this scenario is exercised transitively by `autonomous-run`
+  - standalone runs can still be captured under `eval/results/objective-memory-evidence/` when needed
 
 ### `rollback`
 
@@ -152,16 +172,17 @@ Common failure classes:
 
 ## Latest verification matrix
 
-This section is updated from the latest full sweep artifacts.
+This section is updated from the latest available artifact for each scenario.
 
 | Check | Command | Status | Notes |
 | --- | --- | --- | --- |
 | TypeScript | `bun run typecheck` | PASS | Fresh clean `tsc --noEmit` run on current HEAD |
-| Unit tests | `bun run test:unit` | PASS | `70 pass`, `0 fail`, `225 expect()` |
+| Focused autonomous verification | `bun test tests/unit/autonomous-loop.test.ts tests/unit/eval-scenarios.test.ts tests/unit/plugin-tools.test.ts` | PASS | `69 pass`, `0 fail`, `220 expect()` |
+| Real autonomous eval | `bun run eval:autonomous-run` | PASS | Latest artifact: `eval/results/autonomous-run/2026-04-30T23-46-19.905Z/` |
 | Smoke eval | `bun run scripts/run-eval.ts smoke` | PASS | Latest artifact: `eval/results/smoke/2026-04-30T15-43-54.231Z/` |
-| Full eval suite | Default scenario sweep | PASS | All default scenarios re-ran successfully; latest artifacts listed below |
+| Historical broader suite | `bun run test:unit` | PASS | Earlier sweep: `70 pass`, `0 fail`, `225 expect()` |
 
-## Latest full-sweep artifacts
+## Latest scenario artifacts
 
 - `smoke`: `eval/results/smoke/2026-04-30T15-43-54.231Z/`
   - `exitCode: 0`
@@ -189,7 +210,12 @@ This section is updated from the latest full sweep artifacts.
   - `exitCode: 0`
   - `turnCount: 2`
   - `changedFiles: 5`
-- `autonomous-run`: pending refresh after the next full sweep
+- `autonomous-run`: `eval/results/autonomous-run/2026-04-30T23-46-19.905Z/`
+  - `exitCode: 0`
+  - `turnCount: 2`
+  - `changedFiles: 5`
+- `objective-memory-evidence`: exercised transitively by `autonomous-run` in this refresh
+  - standalone artifact not refreshed separately in this batch
 - `rollback`: `eval/results/rollback/2026-04-30T15-46-10.387Z/`
   - `exitCode: 0`
   - `turnCount: 3`

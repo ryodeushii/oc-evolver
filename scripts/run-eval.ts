@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, relative } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import { syncPluginIntoFixture } from "./sync-plugin-into-fixture.ts"
 
@@ -42,6 +43,55 @@ type EvaluationTurn = {
   exitCode: number
   sessionID: string | null
 }
+
+type ParsedEvalResponse = unknown[] | { raw: string }
+const OUTER_AUTONOMOUS_MUTATING_TOOLS = new Set([
+  "evolver_write_skill",
+  "evolver_write_agent",
+  "evolver_write_command",
+  "evolver_write_memory",
+  "evolver_promote",
+  "evolver_reject",
+  "evolver_rollback",
+  "evolver_delete_artifact",
+  "evolver_prune",
+])
+const AUTONOMOUS_RUN_TURN_ONE_TOOLS = [
+  "evolver_autonomous_configure",
+  "evolver_autonomous_start",
+] as const
+const AUTONOMOUS_RUN_TURN_TWO_TOOLS = [
+  "evolver_autonomous_status",
+  "evolver_status",
+] as const
+const OBJECTIVE_MEMORY_EVIDENCE_TOOLS = [
+  "evolver_autonomous_status",
+  "evolver_status",
+] as const
+const AUTONOMOUS_RUN_OBJECTIVE_PROMPT =
+  'Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.'
+const AUTONOMOUS_RUN_COMPLETION_CRITERIA = {
+  changedArtifacts: ["memory:autonomous-evidence-memory"],
+  evaluationScenarios: ["objective-memory-evidence"],
+} as const
+const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
+  intervalMs: 0,
+  verificationCommands: [],
+  evaluationScenarios: ["smoke"],
+  failurePolicy: {
+    maxConsecutiveFailures: 3,
+    escalationAction: "pause_loop",
+  },
+  objectives: [
+    {
+      prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+      completionCriteria: AUTONOMOUS_RUN_COMPLETION_CRITERIA,
+    },
+  ],
+  replaceObjectives: true,
+  enabled: true,
+  paused: false,
+} as const
 
 export const DEFAULT_SCENARIOS = [
   "smoke",
@@ -86,7 +136,7 @@ export async function runEvaluationScenario(input: {
   const timestamp = input.timestamp ?? new Date().toISOString().replaceAll(":", "-")
   const resultDir = join(input.repoRoot, "eval/results", input.scenarioName, timestamp)
   const turns: EvaluationTurn[] = []
-  const parsedResponses: unknown[] = []
+  const parsedResponses: ParsedEvalResponse[] = []
   let combinedStdout = ""
   let combinedStderr = ""
   let exitCode = 0
@@ -118,11 +168,7 @@ export async function runEvaluationScenario(input: {
       sessionID: nextSessionID,
     })
 
-    if (Array.isArray(parsedResponse)) {
-      parsedResponses.push(...parsedResponse)
-    } else {
-      parsedResponses.push(parsedResponse)
-    }
+    parsedResponses.push(parsedResponse)
 
     combinedStdout += execution.stdout
     combinedStderr += execution.stderr
@@ -179,6 +225,8 @@ export async function runEvaluationScenario(input: {
     scenarioName: input.scenarioName,
     workspaceRoot,
     changedFiles,
+    parsedResponses,
+    turns,
   })
 
   return {
@@ -362,6 +410,8 @@ async function assertScenarioArtifacts(input: {
   scenarioName: string
   workspaceRoot: string
   changedFiles: string[]
+  parsedResponses: ParsedEvalResponse[]
+  turns: EvaluationTurn[]
 }) {
   const auditEvents = await readAuditEvents(input.workspaceRoot)
   const registry = await readRegistry(input.workspaceRoot)
@@ -438,6 +488,34 @@ async function assertScenarioArtifacts(input: {
 
       return
     }
+    case "objective-memory-evidence": {
+      if (input.turns.length !== 1) {
+        throw new Error(`scenario objective-memory-evidence expected exactly 1 turn, got ${input.turns.length}`)
+      }
+
+      const executedToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const executedTools = new Set(executedToolSequence)
+
+      assertExactToolSequence(
+        executedToolSequence,
+        OBJECTIVE_MEMORY_EVIDENCE_TOOLS,
+        "scenario objective-memory-evidence did not stay status-only",
+      )
+
+      assertNoExecutedTools(
+        executedTools,
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario objective-memory-evidence executed a mutating tool",
+      )
+
+      if (input.changedFiles.length > 0) {
+        throw new Error(
+          `scenario objective-memory-evidence created unexpected durable artifacts: ${input.changedFiles.join(", ")}`,
+        )
+      }
+
+      return
+    }
     case "rollback": {
       const promoteEvents = auditEvents.filter(
         (event) => event.action === "promote" && event.status === "success",
@@ -477,6 +555,10 @@ async function assertScenarioArtifacts(input: {
       return
     }
     case "autonomous-run": {
+      if (input.turns.length !== 2) {
+        throw new Error(`scenario autonomous-run expected exactly 2 turns, got ${input.turns.length}`)
+      }
+
       assertAuditAction(auditEvents, "promote", "scenario autonomous-run missing promote audit event")
 
       if (!input.changedFiles.includes(".opencode/oc-evolver/autonomous-loop.json")) {
@@ -489,16 +571,322 @@ async function assertScenarioArtifacts(input: {
 
       const loopState = JSON.parse(
         await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"), "utf8"),
-      ) as { latestLearning?: { summary?: string } | null }
+      ) as {
+        config?: {
+          enabled?: boolean
+          paused?: boolean
+          intervalMs?: number
+          verificationCommands?: string[][]
+          evaluationScenarios?: string[]
+          failurePolicy?: {
+            maxConsecutiveFailures?: number
+            escalationAction?: string
+          }
+        }
+        latestLearning?: { summary?: string } | null
+        objectives?: Array<{
+          prompt?: string
+          status?: string
+          completionCriteria?: {
+            changedArtifacts?: string[]
+            evaluationScenarios?: string[]
+          } | null
+          lastCompletionEvidence?: {
+            satisfied?: boolean
+            changedArtifacts?: string[]
+            passedEvaluationScenarios?: string[]
+          } | null
+        }>
+        iterations?: Array<{
+          decision?: string
+          changedArtifacts?: string[]
+          evaluations?: Array<{
+            scenarioName?: string
+            exitCode?: number
+          }>
+        }>
+      }
+
+      const latestIteration = loopState.iterations?.at(-1)
+
+      if (latestIteration?.decision !== "promoted") {
+        throw new Error("scenario autonomous-run latest iteration was not promoted")
+      }
 
       if (!loopState.latestLearning?.summary?.includes("promoted")) {
         throw new Error("scenario autonomous-run missing promoted learning summary")
+      }
+
+      const objective = loopState.objectives?.[0]
+      const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+      const turnOneTools = new Set(turnOneToolSequence)
+      const turnTwoTools = new Set(turnTwoToolSequence)
+
+      assertExactToolSequence(
+        turnOneToolSequence,
+        AUTONOMOUS_RUN_TURN_ONE_TOOLS,
+        "scenario autonomous-run did not follow the required turn-1 configure/start path",
+      )
+
+      if (turnOneTools.has("evolver_autonomous_run") || turnTwoTools.has("evolver_autonomous_run")) {
+        throw new Error("scenario autonomous-run used evolver_autonomous_run instead of the required start path")
+      }
+
+      const configureEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_configure")
+
+      if (!configureEvent?.input) {
+        throw new Error("scenario autonomous-run did not expose the required configure payload")
+      }
+
+      if (!areJsonValuesEqual(configureEvent.input, AUTONOMOUS_RUN_CONFIGURE_INPUT)) {
+        throw new Error("scenario autonomous-run did not use the required configure payload")
+      }
+
+      assertNoExecutedTools(
+        turnOneTools,
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario autonomous-run executed an unexpected outer-session mutating tool",
+      )
+
+      assertExactToolSequence(
+        turnTwoToolSequence,
+        AUTONOMOUS_RUN_TURN_TWO_TOOLS,
+        "scenario autonomous-run did not prove the required turn-2 status-only path",
+      )
+
+      assertNoExecutedTools(
+        turnTwoTools,
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario autonomous-run executed an unexpected outer-session mutating tool",
+      )
+
+      if (!objective || objective.status !== "completed") {
+        throw new Error("scenario autonomous-run did not complete the queued objective")
+      }
+
+      if (loopState.config?.enabled !== true || loopState.config?.paused !== false) {
+        throw new Error("scenario autonomous-run did not persist the required enabled/paused configuration")
+      }
+
+      if (loopState.config?.intervalMs !== 0) {
+        throw new Error("scenario autonomous-run did not persist intervalMs: 0")
+      }
+
+      if ((loopState.config?.verificationCommands ?? []).length !== 0) {
+        throw new Error("scenario autonomous-run did not persist verificationCommands: []")
+      }
+
+      if (
+        JSON.stringify(loopState.config?.evaluationScenarios ?? []) !==
+        JSON.stringify(["smoke"])
+      ) {
+        throw new Error("scenario autonomous-run did not persist evaluationScenarios: [\"smoke\"]")
+      }
+
+      if (
+        loopState.config?.failurePolicy?.maxConsecutiveFailures !== 3 ||
+        loopState.config?.failurePolicy?.escalationAction !== "pause_loop"
+      ) {
+        throw new Error("scenario autonomous-run did not persist the required failurePolicy")
+      }
+
+      if (objective.prompt !== AUTONOMOUS_RUN_OBJECTIVE_PROMPT) {
+        throw new Error("scenario autonomous-run did not persist the required queued objective prompt")
+      }
+
+      if (
+        JSON.stringify(objective.completionCriteria?.changedArtifacts ?? []) !==
+          JSON.stringify(AUTONOMOUS_RUN_COMPLETION_CRITERIA.changedArtifacts) ||
+        JSON.stringify(objective.completionCriteria?.evaluationScenarios ?? []) !==
+          JSON.stringify(AUTONOMOUS_RUN_COMPLETION_CRITERIA.evaluationScenarios)
+      ) {
+        throw new Error("scenario autonomous-run did not persist the required queued objective completion criteria")
+      }
+
+      const completionEvidence = objective.lastCompletionEvidence
+
+      if (!completionEvidence?.satisfied) {
+        throw new Error("scenario autonomous-run missing satisfied completion evidence")
+      }
+
+      const requiredChangedArtifacts = objective.completionCriteria?.changedArtifacts ?? []
+      const requiredEvaluationScenarios = [
+        ...(loopState.config?.evaluationScenarios ?? []),
+        ...(objective.completionCriteria?.evaluationScenarios ?? []),
+      ]
+
+      for (const artifact of requiredChangedArtifacts) {
+        if (!completionEvidence.changedArtifacts?.includes(artifact)) {
+          throw new Error(
+            `scenario autonomous-run completion evidence missing required changed artifact: ${artifact}`,
+          )
+        }
+
+        if (!latestIteration.changedArtifacts?.includes(artifact)) {
+          throw new Error(
+            `scenario autonomous-run latest iteration missing required changed artifact: ${artifact}`,
+          )
+        }
+
+        if (!registryHasArtifact(registry, artifact)) {
+          throw new Error(`scenario autonomous-run registry missing required artifact: ${artifact}`)
+        }
+      }
+
+      for (const scenarioName of requiredEvaluationScenarios) {
+        if (!completionEvidence.passedEvaluationScenarios?.includes(scenarioName)) {
+          throw new Error(
+            `scenario autonomous-run completion evidence missing required evaluation scenario: ${scenarioName}`,
+          )
+        }
+
+        if (
+          !latestIteration.evaluations?.some(
+            (evaluation) => evaluation.scenarioName === scenarioName && evaluation.exitCode === 0,
+          )
+        ) {
+          throw new Error(
+            `scenario autonomous-run latest iteration missing passing evaluation scenario: ${scenarioName}`,
+          )
+        }
       }
 
       return
     }
     default:
       return
+  }
+}
+
+function registryHasArtifact(
+  registry: {
+    skills?: Record<string, unknown>
+    agents?: Record<string, unknown>
+    commands?: Record<string, unknown>
+    memories?: Record<string, unknown>
+  },
+  artifact: string,
+) {
+  const separatorIndex = artifact.indexOf(":")
+
+  if (separatorIndex === -1) {
+    return false
+  }
+
+  const kind = artifact.slice(0, separatorIndex)
+  const name = artifact.slice(separatorIndex + 1)
+
+  switch (kind) {
+    case "skill":
+      return Boolean(registry.skills?.[name])
+    case "agent":
+      return Boolean(registry.agents?.[name])
+    case "command":
+      return Boolean(registry.commands?.[name])
+    case "memory":
+      return Boolean(registry.memories?.[name])
+    default:
+      return false
+  }
+}
+
+function collectExecutedToolSequence(parsedResponse: ParsedEvalResponse | undefined) {
+  const toolSequence: string[] = []
+
+  walkParsedResponse(parsedResponse, undefined, toolSequence)
+
+  return toolSequence
+}
+
+function collectToolEvents(parsedResponse: ParsedEvalResponse | undefined) {
+  const toolEvents: Array<{ tool: string; input?: unknown }> = []
+
+  walkParsedResponse(parsedResponse, undefined, undefined, toolEvents)
+
+  return toolEvents
+}
+
+function assertNoExecutedTools(toolNames: Set<string>, disallowedTools: Set<string>, message: string) {
+  const executedDisallowedTools = [...toolNames].filter((toolName) => disallowedTools.has(toolName))
+
+  if (executedDisallowedTools.length > 0) {
+    throw new Error(`${message}: ${executedDisallowedTools.join(", ")}`)
+  }
+}
+
+function assertExactToolSequence(actual: string[], expected: readonly string[], message: string) {
+  if (actual.length !== expected.length || actual.some((toolName, index) => toolName !== expected[index])) {
+    throw new Error(`${message}: expected ${expected.join(" -> ")}, got ${actual.join(" -> ") || "(none)"}`)
+  }
+}
+
+function areJsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false
+    }
+
+    return left.every((value, index) => areJsonValuesEqual(value, right[index]))
+  }
+
+  if (left && right && typeof left === "object" && typeof right === "object") {
+    const leftEntries = Object.entries(left).sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+    const rightEntries = Object.entries(right).sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+
+    if (leftEntries.length !== rightEntries.length) {
+      return false
+    }
+
+    return leftEntries.every(([leftKey, leftValue], index) => {
+      const [rightKey, rightValue] = rightEntries[index] ?? []
+
+      return leftKey === rightKey && areJsonValuesEqual(leftValue, rightValue)
+    })
+  }
+
+  return Object.is(left, right)
+}
+
+function walkParsedResponse(
+  value: unknown,
+  toolNames?: Set<string>,
+  toolSequence?: string[],
+  toolEvents?: Array<{ tool: string; input?: unknown }>,
+) {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      walkParsedResponse(entry, toolNames, toolSequence, toolEvents)
+    }
+
+    return
+  }
+
+  if (!value || typeof value !== "object") {
+    return
+  }
+
+  if ("tool" in value && typeof value.tool === "string") {
+    toolNames?.add(value.tool)
+    toolSequence?.push(value.tool)
+    const input =
+      "state" in value &&
+      value.state &&
+      typeof value.state === "object" &&
+      "input" in value.state
+        ? value.state.input
+        : "input" in value
+          ? value.input
+          : undefined
+    toolEvents?.push({
+      tool: value.tool,
+      input,
+    })
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    walkParsedResponse(nestedValue, toolNames, toolSequence, toolEvents)
   }
 }
 
@@ -618,8 +1006,7 @@ async function main() {
     throw new Error("usage: bun run scripts/run-eval.ts <scenario|all>")
   }
 
-  const repoRoot = join(dirname(new URL(import.meta.url).pathname), "..")
-  const normalizedRepoRoot = repoRoot.startsWith("/") ? repoRoot : `/${repoRoot}`
+  const normalizedRepoRoot = fileURLToPath(new URL("..", import.meta.url))
   const scenarios = scenarioArg === "all" ? DEFAULT_SCENARIOS : [scenarioArg]
 
   let failed = false
