@@ -344,6 +344,103 @@ export async function stopAutonomousLoop(input: {
   }
 }
 
+export type AutonomousLoopMetrics = {
+  totalIterations: number
+  promotedCount: number
+  rejectedCount: number
+  rolledBackCount: number
+  skippedCount: number
+  mutationFailedCount: number
+  noPendingRevisionCount: number
+  promotionRate: number
+  avgIterationDurationMs: number
+  lastIterationDurationMs: number | null
+  objectivesCompleted: number
+  objectivesPending: number
+  objectivesQuarantined: number
+  latestIteration: {
+    startedAt: string
+    completedAt: string
+    decision: string
+  } | null
+  since: string
+}
+
+export async function getAutonomousLoopMetrics(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+}): Promise<AutonomousLoopMetrics> {
+  await ensureKernelRuntimePaths(input.pluginFilePath, input.runtimeContract)
+
+  const state = await loadAutonomousLoopState(input.pluginFilePath, input.runtimeContract)
+
+  return computeAutonomousLoopMetrics(state)
+}
+
+function computeAutonomousLoopMetrics(state: PersistedAutonomousLoopState): AutonomousLoopMetrics {
+  const iterations = state.iterations
+  const total = iterations.length
+
+  const promoted = iterations.filter((it) => it.decision === "promoted").length
+  const rejected = iterations.filter((it) => it.decision === "rejected").length
+  const rolledBack = iterations.filter((it) => it.decision === "rolled_back").length
+  const skipped = iterations.filter((it) =>
+    it.decision === "skipped_locked" ||
+    it.decision === "skipped_paused" ||
+    it.decision === "skipped_unrunnable",
+  ).length
+  const mutationFailed = iterations.filter((it) => it.decision === "mutation_failed").length
+  const noPendingRevision = iterations.filter((it) => it.decision === "no_pending_revision").length
+
+  let avgDurationMs = 0
+  let lastDurationMs: number | null = null
+
+  for (const it of iterations) {
+    const duration = Date.parse(it.completedAt) - Date.parse(it.startedAt)
+
+    if (!Number.isNaN(duration)) {
+      avgDurationMs += duration
+
+      if (it === iterations[iterations.length - 1]) {
+        lastDurationMs = duration
+      }
+    }
+  }
+
+  if (total > 0) {
+    avgDurationMs = Math.round(avgDurationMs / total)
+  }
+
+  const latest = iterations.at(-1) ?? null
+  const latestIteration = latest
+    ? {
+        startedAt: latest.startedAt,
+        completedAt: latest.completedAt,
+        decision: latest.decision,
+      }
+    : null
+
+  const objectives = state.objectives
+
+  return {
+    totalIterations: total,
+    promotedCount: promoted,
+    rejectedCount: rejected,
+    rolledBackCount: rolledBack,
+    skippedCount: skipped,
+    mutationFailedCount: mutationFailed,
+    noPendingRevisionCount: noPendingRevision,
+    promotionRate: total > 0 ? Math.round((promoted / total) * 100) / 100 : 0,
+    avgIterationDurationMs: avgDurationMs,
+    lastIterationDurationMs: lastDurationMs,
+    objectivesCompleted: objectives.filter((o) => o.status === "completed").length,
+    objectivesPending: objectives.filter((o) => o.status === "pending").length,
+    objectivesQuarantined: objectives.filter((o) => o.status === "quarantined").length,
+    latestIteration,
+    since: iterations[0]?.startedAt ?? new Date().toISOString(),
+  }
+}
+
 export async function setAutonomousLoopEnabled(input: {
   pluginFilePath: string
   runtimeContract: OCEvolverRuntimeContract

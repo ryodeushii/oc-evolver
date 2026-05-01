@@ -90,6 +90,7 @@ describe("plugin tool surface", () => {
       "evolver_apply_memory",
       "evolver_apply_skill",
       "evolver_autonomous_configure",
+      "evolver_autonomous_metrics",
       "evolver_autonomous_pause",
       "evolver_autonomous_resume",
       "evolver_autonomous_run",

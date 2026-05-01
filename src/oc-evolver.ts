@@ -20,6 +20,7 @@ import {
 import {
   activateAutonomousLoop,
   configureAutonomousLoop,
+  getAutonomousLoopMetrics,
   getAutonomousLoopStatus,
   runAutonomousIteration,
   setAutonomousLoopPaused,
@@ -641,6 +642,20 @@ export function createOCEvolverPlugin(
             })
 
             return JSON.stringify(result, null, 2)
+          },
+        }),
+        evolver_autonomous_metrics: tool({
+          description: "Show structured autonomous loop metrics (success rates, timing, objective stats)",
+          args: {},
+          async execute() {
+            return JSON.stringify(
+              await getAutonomousLoopMetrics({
+                pluginFilePath,
+                runtimeContract,
+              }),
+              null,
+              2,
+            )
           },
         }),
         evolver_autonomous_run: tool({
