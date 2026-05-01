@@ -163,19 +163,22 @@ describe("evaluation harness", () => {
     expect(resultJson.changedFiles).not.toContain(".opencode/package.json")
     expect(resultJson.changedFiles).not.toContain(".opencode/package-lock.json")
 
-    const responseJson = JSON.parse(await readFile(responseJsonPath, "utf8")) as Array<{
-      type: string
-      tool?: string
-      text?: string
-    }>
+    const responseJson = JSON.parse(await readFile(responseJsonPath, "utf8")) as Array<
+      Array<{
+        type: string
+        tool?: string
+        text?: string
+      }>
+    >
     const registryJson = JSON.parse(await readFile(registryPath, "utf8")) as {
       skills: Record<string, unknown>
       currentRevision: string | null
     }
 
-    expect(responseJson).toHaveLength(3)
-    expect(responseJson[1]).toMatchObject({ type: "tool_use", tool: "evolver_status" })
-    expect(responseJson[2]).toMatchObject({ type: "text", text: "smoke ok" })
+    expect(responseJson).toHaveLength(1)
+    expect(responseJson[0]).toHaveLength(3)
+    expect(responseJson[0]?.[1]).toMatchObject({ type: "tool_use", tool: "evolver_status" })
+    expect(responseJson[0]?.[2]).toMatchObject({ type: "text", text: "smoke ok" })
     expect(registryJson.currentRevision).toBe("rev-1")
     expect(registryJson.skills).toHaveProperty("fixture-refactor")
   })
