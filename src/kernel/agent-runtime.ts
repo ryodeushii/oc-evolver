@@ -318,6 +318,16 @@ export async function runCommandInSession(input: {
     },
     ...(preferredModel ? { preferredModel } : {}),
   }
+  const previousMemoryState = await loadSessionMemoryState({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+  })
+  const previousRuntimePolicy = await loadSessionRuntimePolicy({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+  })
 
   const systemSections = [
     `Run command: ${commandProfile.name}`,
@@ -332,17 +342,6 @@ export async function runCommandInSession(input: {
 
   systemSections.push("Command instructions:", commandProfile.document.body)
 
-  const response = await promptSession({
-    client: input.client,
-    sessionID: input.sessionID,
-    pluginFilePath: input.pluginFilePath,
-    runtimeContract: input.runtimeContract,
-    body: {
-      system: systemSections.join("\n\n"),
-      parts: [{ type: "text", text: input.prompt }],
-    },
-  })
-
   await rememberLoadedMemoryProfiles({
     pluginFilePath: input.pluginFilePath,
     runtimeContract: input.runtimeContract,
@@ -355,6 +354,30 @@ export async function runCommandInSession(input: {
     sessionID: input.sessionID,
     runtimePolicy,
   })
+
+  let response: SessionPromptResponse
+
+  try {
+    response = await promptSession({
+      client: input.client,
+      sessionID: input.sessionID,
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      body: {
+        system: systemSections.join("\n\n"),
+        parts: [{ type: "text", text: input.prompt }],
+      },
+    })
+  } catch (error) {
+    await restoreSessionRuntimeState({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      sessionID: input.sessionID,
+      memoryState: previousMemoryState,
+      runtimePolicy: previousRuntimePolicy,
+    })
+    throw error
+  }
 
   await appendAuditEvent({
     pluginFilePath: input.pluginFilePath,
@@ -695,6 +718,45 @@ async function rememberSessionRuntimePolicy(input: {
     state: {
       ...persistedState,
       runtimePolicy: serializeRuntimePolicy(input.runtimePolicy),
+    },
+  })
+}
+
+async function restoreSessionRuntimeState(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  sessionID: string
+  memoryState: Map<string, SessionMemoryState> | null
+  runtimePolicy: SessionRuntimePolicy | null
+}) {
+  const sessionCacheKey = resolveSessionCacheKey(input)
+
+  if (input.memoryState) {
+    sessionMemories.set(sessionCacheKey, new Map(input.memoryState.entries()))
+  } else {
+    sessionMemories.delete(sessionCacheKey)
+  }
+
+  if (input.runtimePolicy) {
+    sessionRuntimePolicies.set(sessionCacheKey, input.runtimePolicy)
+  } else {
+    sessionRuntimePolicies.delete(sessionCacheKey)
+  }
+
+  const persistedState = await loadPersistedSessionState(input)
+
+  await persistSessionState({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    state: {
+      ...persistedState,
+      ...(input.memoryState
+        ? { memories: Object.fromEntries(input.memoryState.entries()) }
+        : {}),
+      ...(input.memoryState ? {} : { memories: undefined }),
+      ...(input.runtimePolicy ? { runtimePolicy: serializeRuntimePolicy(input.runtimePolicy) } : {}),
+      ...(input.runtimePolicy ? {} : { runtimePolicy: undefined }),
     },
   })
 }

@@ -14,6 +14,7 @@ import {
   rejectPendingRevision,
   rollbackLatestRevision,
   saveRegistry,
+  validateRegistryArtifacts,
 } from "../../src/kernel/registry.ts"
 
 describe("registry transactions", () => {
@@ -521,5 +522,40 @@ Review README.md twice.
     await expect(
       access(join(workspaceRoot, `.opencode/oc-evolver/revisions/${second.revisionID}.json`)),
     ).rejects.toBeDefined()
+  })
+
+  test("flags commands that reference unknown memory profiles during registry validation", async () => {
+    const result = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "command",
+        name: "review-markdown",
+        document: `---
+description: Review markdown files
+memory:
+  - missing-memory
+---
+
+Focus on correctness and risk.
+`,
+      },
+    })
+    await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    const validation = await validateRegistryArtifacts(pluginFilePath, runtimeContract)
+
+    expect(validation.invalid).toContainEqual(
+      expect.objectContaining({
+        target: ".opencode/commands/review-markdown.md",
+        kind: "command",
+        reason: "unknown memory profile referenced by command: missing-memory",
+      }),
+    )
+    expect(validation.registry.quarantine[".opencode/commands/review-markdown.md"]).toMatchObject({
+      kind: "command",
+      failureClass: "invalid_artifact",
+    })
+    expect(result.registry.pendingRevision).not.toBeNull()
   })
 })

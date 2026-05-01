@@ -724,6 +724,45 @@ export async function getPendingRevisionReview(
   }
 }
 
+export async function persistPendingRevisionReviewArtifacts(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  review: PendingRevisionReview
+}) {
+  const kernelPaths = resolveKernelPaths(input.pluginFilePath, input.runtimeContract)
+  const deletedCommands = input.review.pendingRevisionID
+    ? Object.keys(input.review.current?.commands ?? {}).filter(
+        (name) => !(name in (input.review.pending?.commands ?? {})),
+      )
+    : []
+
+  await writeJSONAtomically({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    path: join(kernelPaths.registryRoot, "pending-review.json"),
+    value: input.review,
+  })
+  await writeJSONAtomically({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    path: join(kernelPaths.registryRoot, "pending-review-snapshot.json"),
+    value: {
+      pendingRevisionID: input.review.pendingRevisionID,
+      snapshotPath: input.review.pendingRevisionID
+        ? `.opencode/oc-evolver/revisions/${input.review.pendingRevisionID}.json`
+        : null,
+    },
+  })
+  await writeJSONAtomically({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    path: join(kernelPaths.registryRoot, "pending-deletion-state.json"),
+    value: {
+      deletedCommands,
+    },
+  })
+}
+
 async function materializeMutation(input: {
   pluginFilePath: string
   runtimeContract: OCEvolverRuntimeContract
@@ -1519,6 +1558,16 @@ async function collectCommandIntegrityFindings(input: {
       kind: input.entry.kind,
       reason: `unknown agent referenced by command: ${parsedDocument.frontmatter.agent}`,
     })
+  }
+
+  for (const memoryName of parsedDocument.frontmatter.memory ?? []) {
+    if (!input.registry.memories[memoryName]) {
+      pushInvalidArtifact(input.invalid, {
+        target: input.entry.nativePath,
+        kind: input.entry.kind,
+        reason: `unknown memory profile referenced by command: ${memoryName}`,
+      })
+    }
   }
 
   if (hashTextDocument(parsedDocument.raw) !== input.entry.contentHash) {

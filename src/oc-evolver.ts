@@ -31,6 +31,7 @@ import {
   ensureKernelRuntimePaths,
   getPendingRevisionReview,
   loadRegistry,
+  persistPendingRevisionReviewArtifacts,
   promotePendingRevision,
   pruneRegistryRevisions,
   rejectPendingRevision,
@@ -737,6 +738,12 @@ export function createOCEvolverPlugin(
           args: {},
           async execute() {
             const result = await getPendingRevisionReview(pluginFilePath, runtimeContract)
+
+            await persistPendingRevisionReviewArtifacts({
+              pluginFilePath,
+              runtimeContract,
+              review: result,
+            })
 
             await appendAuditEvent({
               pluginFilePath,

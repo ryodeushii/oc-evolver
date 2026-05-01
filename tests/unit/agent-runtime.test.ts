@@ -992,4 +992,100 @@ Focus on correctness and risk.
 
     expect(permissionOutput.status).toBe("deny")
   })
+
+  test("evolver_run_command applies command-owned permission policy during the command run itself", async () => {
+    let hooks: Awaited<ReturnType<typeof OCEvolverPlugin>> | undefined
+
+    hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async (payload: unknown) => {
+            promptCalls.push(payload)
+
+            if (promptCalls.length > 1) {
+              const toolOutput: { status?: "ask" | "deny" | "allow" } = {
+                status: "ask",
+              }
+
+              await hooks?.["permission.ask"]?.(
+                {
+                  id: "perm-command-inline-1",
+                  type: "edit",
+                  pattern: ".opencode/commands/review.md",
+                  sessionID: "session-command-inline",
+                  messageID: "message-inline-permission",
+                  title: "Inline edit during command run",
+                  metadata: {},
+                  time: {
+                    created: Date.now(),
+                  },
+                },
+                toolOutput,
+              )
+
+              expect(toolOutput.status).toBe("deny")
+            }
+
+            return { info: {}, parts: [] }
+          },
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_command?.execute(
+      {
+        commandName: "review-markdown",
+        document: `---
+description: Review markdown files
+permission:
+  edit: deny
+---
+
+Focus on correctness and risk.
+`,
+      },
+      {
+        sessionID: "session-command-inline",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_run_command?.execute(
+      {
+        commandName: "review-markdown",
+        prompt: "Review README.md and summarize the risk.",
+      },
+      {
+        sessionID: "session-command-inline",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+  })
 })

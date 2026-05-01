@@ -141,6 +141,82 @@ Review README.md twice.
     expect(review.changedArtifacts.commands).toEqual(["review-markdown"])
     expect(review.pending.commands["review-markdown"]?.document).toContain("Second review flow")
     expect(review.current.commands["review-markdown"]?.document).toContain("First review flow")
+
+    const persistedReview = JSON.parse(
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/pending-review.json"), "utf8"),
+    ) as {
+      currentRevisionID: string | null
+      pendingRevisionID: string | null
+      changedArtifacts: { commands: string[] }
+    }
+    const persistedSnapshot = JSON.parse(
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/pending-review-snapshot.json"), "utf8"),
+    ) as {
+      pendingRevisionID: string | null
+      snapshotPath: string | null
+    }
+    const deletionState = JSON.parse(
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"), "utf8"),
+    ) as {
+      deletedCommands: string[]
+    }
+
+    expect(persistedReview).toMatchObject({
+      currentRevisionID: review.currentRevisionID,
+      pendingRevisionID: review.pendingRevisionID,
+      changedArtifacts: {
+        commands: ["review-markdown"],
+      },
+    })
+    expect(persistedSnapshot).toMatchObject({
+      pendingRevisionID: review.pendingRevisionID,
+      snapshotPath: `.opencode/oc-evolver/revisions/${review.pendingRevisionID}.json`,
+    })
+    expect(deletionState.deletedCommands).toEqual([])
+  })
+
+  test("evolver_review_pending persists an empty deletion summary when no pending revision exists", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool.evolver_write_command.execute({
+      commandName: "review-markdown",
+      document: `---
+description: First review flow
+---
+
+Review README.md.
+`,
+    })
+    await hooks.tool.evolver_promote.execute({})
+
+    const review = JSON.parse(await hooks.tool.evolver_review_pending.execute({})) as {
+      pendingRevisionID: string | null
+    }
+    const deletionState = JSON.parse(
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/pending-deletion-state.json"), "utf8"),
+    ) as {
+      deletedCommands: string[]
+    }
+
+    expect(review.pendingRevisionID).toBeNull()
+    expect(deletionState.deletedCommands).toEqual([])
   })
 
   test("autonomous start and resume activate the loop instead of only flipping persisted state", async () => {
