@@ -74,11 +74,13 @@ type SkillRevisionEntry = {
   document: string
   helperFiles: SkillBundleFileInput[]
   contentHash: string
+  hotLoad?: boolean
 }
 
 type TextRevisionEntry = {
   document: string
   contentHash: string
+  hotLoad?: boolean
 }
 
 type RevisionEntries = {
@@ -125,12 +127,19 @@ type RevisionRecord = {
   entries: RevisionEntries
 }
 
+export type PromotedEntrySummary = {
+  kind: RegistryArtifactKind
+  name: string
+  hotLoad?: boolean
+}
+
 type MutationInput =
   | {
       kind: "skill"
       name: string
       document: string
       helperFiles: SkillBundleFileInput[]
+      hotLoad?: boolean
     }
   | {
       kind: "agent"
@@ -146,6 +155,7 @@ type MutationInput =
       kind: "memory"
       name: string
       document: string
+      hotLoad?: boolean
     }
 
 export type RegistryArtifactKind = "skill" | "agent" | "command" | "memory"
@@ -430,6 +440,7 @@ export async function promotePendingRevision(
   return {
     currentRevisionID: pendingRevision.revisionID,
     pendingRevisionID: null,
+    promotedEntries: listPromotedEntries(pendingRevision.entries),
   }
 }
 
@@ -781,6 +792,7 @@ async function materializeMutation(input: {
       document: bundle.skillDocument.raw,
       helperFiles: bundle.helperFiles,
       contentHash,
+      ...(input.mutation.hotLoad === undefined ? {} : { hotLoad: input.mutation.hotLoad }),
     }
 
     return {
@@ -852,6 +864,7 @@ async function materializeMutation(input: {
     input.entries.memories[input.mutation.name] = {
       document: memoryDocument.raw,
       contentHash,
+      ...(input.mutation.hotLoad === undefined ? {} : { hotLoad: input.mutation.hotLoad }),
     }
 
     return {
@@ -1252,6 +1265,29 @@ function diffRevisionEntries(current: RevisionEntries, pending: RevisionEntries)
     commands: diffRevisionEntryNames(current.commands, pending.commands),
     memories: diffRevisionEntryNames(current.memories, pending.memories),
   }
+}
+
+function listPromotedEntries(entries: RevisionEntries): PromotedEntrySummary[] {
+  return [
+    ...Object.entries(entries.skills).map(([name, entry]) => ({
+      kind: "skill" as const,
+      name,
+      ...(entry.hotLoad === undefined ? {} : { hotLoad: entry.hotLoad }),
+    })),
+    ...Object.entries(entries.agents).map(([name]) => ({
+      kind: "agent" as const,
+      name,
+    })),
+    ...Object.entries(entries.commands).map(([name]) => ({
+      kind: "command" as const,
+      name,
+    })),
+    ...Object.entries(entries.memories).map(([name, entry]) => ({
+      kind: "memory" as const,
+      name,
+      ...(entry.hotLoad === undefined ? {} : { hotLoad: entry.hotLoad }),
+    })),
+  ]
 }
 
 function diffRevisionEntryNames(

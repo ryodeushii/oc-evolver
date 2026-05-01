@@ -52,6 +52,8 @@ export { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 type OCEvolverPluginDependencies = {
   activateAutonomousLoop?: typeof activateAutonomousLoop
   runEvaluationScenario?: typeof runEvaluationScenario
+  applySkillToSession?: typeof applySkillToSession
+  applyMemoryToSession?: typeof applyMemoryToSession
 }
 
 type PermissionRequest = {
@@ -413,6 +415,7 @@ export function createOCEvolverPlugin(
                 content: tool.schema.string(),
               }),
             ).default([]),
+            hotLoad: tool.schema.boolean().optional(),
           },
           async execute(args) {
             const result = await applyMutationTransaction({
@@ -423,6 +426,7 @@ export function createOCEvolverPlugin(
                 name: args.skillName,
                 document: args.skillDocument,
                 helperFiles: args.helperFiles,
+                hotLoad: args.hotLoad,
               },
             })
 
@@ -474,6 +478,7 @@ export function createOCEvolverPlugin(
           args: {
             memoryName: tool.schema.string(),
             document: tool.schema.string(),
+            hotLoad: tool.schema.boolean().optional(),
           },
           async execute(args) {
             const result = await applyMutationTransaction({
@@ -483,6 +488,7 @@ export function createOCEvolverPlugin(
                 kind: "memory",
                 name: args.memoryName,
                 document: args.document,
+                hotLoad: args.hotLoad,
               },
             })
 
@@ -846,10 +852,81 @@ export function createOCEvolverPlugin(
         evolver_promote: tool({
           description: "Promote pending revision to accepted",
           args: {},
-          async execute() {
+          async execute(_, toolCtx) {
             const result = await promotePendingRevision(pluginFilePath, runtimeContract)
+            const hotLoad = {
+              sessionID: toolCtx.sessionID ?? null,
+              applied: [] as Array<{ kind: "skill" | "memory"; name: string }>,
+              failed: [] as Array<{ kind: string; name: string; reason: string }>,
+              skipped: [] as Array<{ kind?: string; name?: string; reason: string }>,
+            }
+            const eligibleEntries = result.promotedEntries.filter((entry) => entry.hotLoad)
 
-            return JSON.stringify(result)
+            if (eligibleEntries.length === 0) {
+              hotLoad.skipped.push({ reason: "no_hot_load_entries" })
+
+              return JSON.stringify({
+                currentRevisionID: result.currentRevisionID,
+                pendingRevisionID: result.pendingRevisionID,
+                hotLoad,
+              })
+            }
+
+            if (!toolCtx.sessionID) {
+              hotLoad.skipped.push({ reason: "missing_session" })
+
+              return JSON.stringify({
+                currentRevisionID: result.currentRevisionID,
+                pendingRevisionID: result.pendingRevisionID,
+                hotLoad,
+              })
+            }
+
+            for (const entry of eligibleEntries) {
+              try {
+                if (entry.kind === "skill") {
+                  await (dependencies.applySkillToSession ?? applySkillToSession)({
+                    client: ctx.client,
+                    pluginFilePath,
+                    runtimeContract,
+                    sessionID: toolCtx.sessionID,
+                    skillName: entry.name,
+                  })
+                  hotLoad.applied.push({ kind: entry.kind, name: entry.name })
+                  continue
+                }
+
+                if (entry.kind === "memory") {
+                  await (dependencies.applyMemoryToSession ?? applyMemoryToSession)({
+                    client: ctx.client,
+                    pluginFilePath,
+                    runtimeContract,
+                    sessionID: toolCtx.sessionID,
+                    memoryName: entry.name,
+                  })
+                  hotLoad.applied.push({ kind: entry.kind, name: entry.name })
+                  continue
+                }
+
+                hotLoad.skipped.push({
+                  kind: entry.kind,
+                  name: entry.name,
+                  reason: "unsupported_kind",
+                })
+              } catch (error) {
+                hotLoad.failed.push({
+                  kind: entry.kind,
+                  name: entry.name,
+                  reason: error instanceof Error ? error.message : String(error),
+                })
+              }
+            }
+
+            return JSON.stringify({
+              currentRevisionID: result.currentRevisionID,
+              pendingRevisionID: result.pendingRevisionID,
+              hotLoad,
+            })
           },
         }),
         evolver_reject: tool({

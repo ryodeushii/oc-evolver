@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 
-import { OCEvolverPlugin } from "../../src/oc-evolver.ts"
+import { OCEvolverPlugin, createOCEvolverPlugin } from "../../src/oc-evolver.ts"
 
 describe("plugin tool surface", () => {
   let workspaceRoot: string
@@ -117,6 +117,430 @@ describe("plugin tool surface", () => {
 
     expect(hooks.tool?.evolver_apply_memory?.description).toContain("memory profile")
     expect(hooks.tool?.evolver_rollback?.description).toContain("Rollback")
+  })
+
+  test("evolver_write_skill forwards hotLoad into the pending revision", async () => {
+    const toolCtx = createToolContext()
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_skill?.execute({
+      skillName: "fixture-refactor",
+      skillDocument: `---
+name: fixture-refactor
+description: Rewrite TODO markers in markdown files
+---
+
+Use the helper.
+`,
+      helperFiles: [
+        {
+          relativePath: "scripts/rewrite.py",
+          content: "print('rewrite')\n",
+        },
+      ],
+      hotLoad: true,
+    }, toolCtx)
+
+    const registry = JSON.parse(
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
+    ) as {
+      pendingRevision: string
+    }
+    const revision = JSON.parse(
+      await readFile(
+        join(workspaceRoot, `.opencode/oc-evolver/revisions/${registry.pendingRevision}.json`),
+        "utf8",
+      ),
+    )
+
+    expect(revision.entries.skills["fixture-refactor"].hotLoad).toBe(true)
+  })
+
+  test("evolver_write_memory leaves hotLoad unset by default", async () => {
+    const toolCtx = createToolContext()
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_memory?.execute({
+      memoryName: "project-preferences",
+      document: `---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+queries:
+  - oc-evolver memory profiles
+---
+
+Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance.
+`,
+    }, toolCtx)
+
+    const registry = JSON.parse(
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
+    ) as {
+      pendingRevision: string
+    }
+    const revision = JSON.parse(
+      await readFile(
+        join(workspaceRoot, `.opencode/oc-evolver/revisions/${registry.pendingRevision}.json`),
+        "utf8",
+      ),
+    )
+
+    expect(revision.entries.memories["project-preferences"].hotLoad).toBeUndefined()
+  })
+
+  test("evolver_promote hot-loads only flagged promoted artifacts into the current session", async () => {
+    const applied: Array<{ kind: string; name: string; sessionID: string }> = []
+    const toolCtx = createToolContext()
+    const plugin = createOCEvolverPlugin(undefined, {
+      applySkillToSession: async ({ skillName, sessionID }) => {
+        applied.push({ kind: "skill", name: skillName, sessionID })
+      },
+      applyMemoryToSession: async ({ memoryName, sessionID }) => {
+        applied.push({ kind: "memory", name: memoryName, sessionID })
+      },
+    })
+    const hooks = await plugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_skill?.execute({
+      skillName: "fixture-refactor",
+      skillDocument: `---
+name: fixture-refactor
+description: Rewrite TODO markers in markdown files
+---
+
+Use the helper.
+`,
+      helperFiles: [],
+      hotLoad: true,
+    }, toolCtx)
+    await hooks.tool?.evolver_write_memory?.execute({
+      memoryName: "project-preferences",
+      document: `---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+queries:
+  - oc-evolver memory profiles
+---
+
+Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance.
+`,
+      hotLoad: true,
+    }, toolCtx)
+    await hooks.tool?.evolver_write_memory?.execute({
+      memoryName: "unflagged-memory",
+      document: `---
+name: unflagged-memory
+description: Extra memory profile
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+queries:
+  - unflagged memory
+---
+
+Do not hot-load this profile.
+`,
+    }, toolCtx)
+
+    const promoteResult = await hooks.tool?.evolver_promote?.execute({}, toolCtx)
+    const promoted = JSON.parse(toolOutputText(promoteResult)) as {
+      currentRevisionID: string
+      pendingRevisionID: string | null
+      hotLoad: {
+        sessionID: string | null
+        applied: Array<{ kind: string; name: string }>
+        failed: Array<{ kind: string; name: string; reason: string }>
+        skipped: Array<{ kind?: string; name?: string; reason: string }>
+      }
+    }
+
+    expect(applied).toEqual([
+      { kind: "skill", name: "fixture-refactor", sessionID: "session-plugin-tools" },
+      { kind: "memory", name: "project-preferences", sessionID: "session-plugin-tools" },
+    ])
+    expect(promoted.currentRevisionID).toBeString()
+    expect(promoted.pendingRevisionID).toBeNull()
+    expect(promoted.hotLoad).toEqual({
+      sessionID: "session-plugin-tools",
+      applied: [
+        { kind: "skill", name: "fixture-refactor" },
+        { kind: "memory", name: "project-preferences" },
+      ],
+      failed: [],
+      skipped: [],
+    })
+  })
+
+  test("evolver_promote skips session hot-load when tool context has no sessionID", async () => {
+    const applyCalls: string[] = []
+    const plugin = createOCEvolverPlugin(undefined, {
+      applyMemoryToSession: async ({ memoryName }) => {
+        applyCalls.push(memoryName)
+      },
+    })
+    const hooks = await plugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_memory?.execute({
+      memoryName: "project-preferences",
+      document: `---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+queries:
+  - oc-evolver memory profiles
+---
+
+Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance.
+`,
+      hotLoad: true,
+    }, createToolContext())
+
+    const promoteResult = await hooks.tool?.evolver_promote?.execute({}, {
+      messageID: "message-plugin-tools",
+      agent: "main",
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      abort: new AbortController().signal,
+      metadata() {},
+      ask() {
+        throw new Error("not implemented")
+      },
+    } as never)
+    const promoted = JSON.parse(toolOutputText(promoteResult)) as {
+      currentRevisionID: string
+      hotLoad: {
+        sessionID: string | null
+        applied: Array<unknown>
+        failed: Array<unknown>
+        skipped: Array<{ reason: string }>
+      }
+    }
+
+    expect(applyCalls).toEqual([])
+    expect(promoted.currentRevisionID).toBeString()
+    expect(promoted.hotLoad.sessionID).toBeNull()
+    expect(promoted.hotLoad.applied).toEqual([])
+    expect(promoted.hotLoad.failed).toEqual([])
+    expect(promoted.hotLoad.skipped).toEqual([{ reason: "missing_session" }])
+  })
+
+  test("evolver_promote reports hot-load failures without undoing promotion", async () => {
+    const toolCtx = createToolContext()
+    const plugin = createOCEvolverPlugin(undefined, {
+      applyMemoryToSession: async () => {
+        throw new Error("unknown memory profile")
+      },
+    })
+    const hooks = await plugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_memory?.execute({
+      memoryName: "project-preferences",
+      document: `---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+queries:
+  - oc-evolver memory profiles
+---
+
+Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance.
+`,
+      hotLoad: true,
+    }, toolCtx)
+
+    const promoteResult = await hooks.tool?.evolver_promote?.execute({}, toolCtx)
+    const promoted = JSON.parse(toolOutputText(promoteResult)) as {
+      currentRevisionID: string
+      pendingRevisionID: string | null
+      hotLoad: {
+        sessionID: string | null
+        applied: Array<unknown>
+        failed: Array<{ kind: string; name: string; reason: string }>
+        skipped: Array<unknown>
+      }
+    }
+    const registry = JSON.parse(
+      await readFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
+    ) as {
+      currentRevision: string | null
+      pendingRevision: string | null
+    }
+
+    expect(promoted.currentRevisionID).toBeString()
+    expect(promoted.pendingRevisionID).toBeNull()
+    expect(promoted.hotLoad.sessionID).toBe("session-plugin-tools")
+    expect(promoted.hotLoad.applied).toEqual([])
+    expect(promoted.hotLoad.failed).toEqual([
+      {
+        kind: "memory",
+        name: "project-preferences",
+        reason: "unknown memory profile",
+      },
+    ])
+    expect(promoted.hotLoad.skipped).toEqual([])
+    expect(registry.currentRevision).toBe(promoted.currentRevisionID)
+    expect(registry.pendingRevision).toBeNull()
+  })
+
+  test("evolver_promote reports no_hot_load_entries when nothing eligible is flagged", async () => {
+    const applyCalls: string[] = []
+    const toolCtx = createToolContext()
+    const plugin = createOCEvolverPlugin(undefined, {
+      applyMemoryToSession: async ({ memoryName }) => {
+        applyCalls.push(memoryName)
+      },
+    })
+    const hooks = await plugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_memory?.execute({
+      memoryName: "project-preferences",
+      document: `---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+queries:
+  - oc-evolver memory profiles
+---
+
+Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance.
+`,
+    }, toolCtx)
+
+    const promoteResult = await hooks.tool?.evolver_promote?.execute({}, toolCtx)
+    const promoted = JSON.parse(toolOutputText(promoteResult)) as {
+      currentRevisionID: string
+      pendingRevisionID: string | null
+      hotLoad: {
+        sessionID: string | null
+        applied: Array<unknown>
+        failed: Array<unknown>
+        skipped: Array<{ reason: string }>
+      }
+    }
+
+    expect(applyCalls).toEqual([])
+    expect(promoted.currentRevisionID).toBeString()
+    expect(promoted.pendingRevisionID).toBeNull()
+    expect(promoted.hotLoad).toEqual({
+      sessionID: "session-plugin-tools",
+      applied: [],
+      failed: [],
+      skipped: [{ reason: "no_hot_load_entries" }],
+    })
   })
 
   test("evolver_review_pending returns pending revision review details", async () => {

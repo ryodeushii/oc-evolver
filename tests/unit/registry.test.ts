@@ -179,6 +179,37 @@ Use the helper.
     })
   })
 
+  test("records hot-load intent on pending skill revisions", async () => {
+    const result = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "skill",
+        name: "fixture-refactor",
+        document: `---
+name: fixture-refactor
+description: Rewrite TODO markers in markdown files
+---
+
+Use the helper.
+`,
+        helperFiles: [
+          {
+            relativePath: "scripts/rewrite.py",
+            content: "print('rewrite')\n",
+          },
+        ],
+        hotLoad: true,
+      },
+    })
+
+    const revision = JSON.parse(
+      await readFile(join(workspaceRoot, `.opencode/oc-evolver/revisions/${result.revisionID}.json`), "utf8"),
+    )
+
+    expect(revision.entries.skills["fixture-refactor"].hotLoad).toBe(true)
+  })
+
   test("records a memory mutation in registry metadata and a pending revision snapshot", async () => {
     const result = await applyMutationTransaction({
       pluginFilePath,
@@ -240,6 +271,35 @@ Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance
       revisionID: result.revisionID,
       target: ".opencode/memory/project-preferences.md",
     })
+  })
+
+  test("leaves hot-load unset when a memory mutation does not request it", async () => {
+    const result = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "memory",
+        name: "project-preferences",
+        document: `---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+queries:
+  - oc-evolver memory profiles
+---
+
+Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance.
+`,
+      },
+    })
+
+    const revision = JSON.parse(
+      await readFile(join(workspaceRoot, `.opencode/oc-evolver/revisions/${result.revisionID}.json`), "utf8"),
+    )
+
+    expect(revision.entries.memories["project-preferences"].hotLoad).toBeUndefined()
   })
 
   test("reads pending revision review details without mutating registry state", async () => {
@@ -390,6 +450,40 @@ Review README.md twice.
     expect(
       await readFile(join(workspaceRoot, ".opencode/commands/review-markdown.md"), "utf8"),
     ).toContain("First review flow")
+  })
+
+  test("returns promoted entry summaries for plugin-layer hot-load handling", async () => {
+    const first = await applyMutationTransaction({
+      pluginFilePath,
+      runtimeContract,
+      mutation: {
+        kind: "memory",
+        name: "project-preferences",
+        document: `---
+name: project-preferences
+description: Shared project memory routing
+storage_mode: memory-and-artifact
+sources:
+  - memory://memory/config/global
+queries:
+  - oc-evolver memory profiles
+---
+
+Prefer Basic Memory notes over ad-hoc local docs when recording durable guidance.
+`,
+        hotLoad: true,
+      },
+    })
+
+    const promoted = await promotePendingRevision(pluginFilePath, runtimeContract)
+
+    expect(promoted).toMatchObject({
+      currentRevisionID: first.revisionID,
+      pendingRevisionID: null,
+      promotedEntries: [
+        { kind: "memory", name: "project-preferences", hotLoad: true },
+      ],
+    })
   })
 
   test("rolls back the latest accepted revision and removes additive artifacts", async () => {
