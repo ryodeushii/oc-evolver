@@ -22,6 +22,7 @@ import {
   configureAutonomousLoop,
   getAutonomousLoopMetrics,
   getAutonomousLoopStatus,
+  previewAutonomousIteration,
   runAutonomousIteration,
   setAutonomousLoopPaused,
   stopAutonomousLoop,
@@ -652,6 +653,23 @@ export function createOCEvolverPlugin(
               await getAutonomousLoopMetrics({
                 pluginFilePath,
                 runtimeContract,
+              }),
+              null,
+              2,
+            )
+          },
+        }),
+        evolver_autonomous_preview: tool({
+          description: "Preview what the next autonomous iteration would do without executing it",
+          args: {
+            prompt: tool.schema.string().optional(),
+          },
+          async execute(args) {
+            return JSON.stringify(
+              await previewAutonomousIteration({
+                pluginFilePath,
+                runtimeContract,
+                prompt: args.prompt,
               }),
               null,
               2,

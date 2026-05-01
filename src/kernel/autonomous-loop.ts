@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process"
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { Worker, type WorkerOptions } from "node:worker_threads"
 
@@ -438,6 +438,109 @@ function computeAutonomousLoopMetrics(state: PersistedAutonomousLoopState): Auto
     objectivesQuarantined: objectives.filter((o) => o.status === "quarantined").length,
     latestIteration,
     since: iterations[0]?.startedAt ?? new Date().toISOString(),
+  }
+}
+
+export type AutonomousLoopPreview = {
+  wouldRun: boolean
+  wouldSkipReason: string | null
+  selectedObjective: string | null
+  mutationPrompt: string | null
+  verificationCommands: string[][]
+  evaluationScenarios: string[]
+  config: {
+    enabled: boolean
+    paused: boolean
+    intervalMs: number
+  }
+  lockHeld: boolean
+  runtimeContractCompatible: boolean
+  runtimeContractDetail: string | null
+  pendingObjectives: string[]
+}
+
+export async function previewAutonomousIteration(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  prompt?: string
+}): Promise<AutonomousLoopPreview> {
+  await ensureKernelRuntimePaths(input.pluginFilePath, input.runtimeContract)
+
+  const state = await loadAutonomousLoopState(input.pluginFilePath, input.runtimeContract)
+  const lockPath = resolveAutonomousLoopLockPath(input.pluginFilePath, input.runtimeContract)
+  let lockHeld = false
+
+  try {
+    const lockStat = await stat(lockPath)
+    lockHeld = lockStat.isDirectory()
+  } catch {
+    lockHeld = false
+  }
+
+  const objectivePrompt = selectObjectivePrompt(state, input.prompt)
+  const pendingObjectives = state.objectives
+    .filter((o) => o.status === "pending")
+    .map((o) => o.prompt)
+
+  const configuredVerificationCommands = normalizeCommandMatrix(
+    state.config.verificationCommands,
+    DEFAULT_VERIFICATION_COMMANDS,
+  )
+  const verificationCommands = dedupeCommandMatrix([
+    ...configuredVerificationCommands,
+    ...collectObjectiveVerificationCommands(state.objectives, objectivePrompt),
+  ])
+  const configuredEvaluationScenarios = dedupeStrings(state.config.evaluationScenarios)
+  const evaluationScenarios = dedupeStrings([
+    ...configuredEvaluationScenarios,
+    ...collectObjectiveEvaluationScenarios(state.objectives, objectivePrompt),
+  ])
+
+  let wouldRun = true
+  let wouldSkipReason: string | null = null
+
+  if (!state.config.enabled) {
+    wouldRun = false
+    wouldSkipReason = "autonomous loop is disabled"
+  } else if (state.config.paused) {
+    wouldRun = false
+    wouldSkipReason = "autonomous loop is paused"
+  } else if (lockHeld) {
+    wouldRun = false
+    wouldSkipReason = "autonomous loop lock is already held (another iteration may be running)"
+  } else if (!objectivePrompt) {
+    wouldRun = false
+    wouldSkipReason = "no pending objectives"
+  }
+
+  const runtimeContractCompatible = input.runtimeContract.runFlags.includes("--dangerously-skip-permissions") &&
+    input.runtimeContract.runFlags.includes("--format") &&
+    input.runtimeContract.runFlags.includes("--dir")
+
+  const runtimeContractDetail = runtimeContractCompatible
+    ? null
+    : "runtime contract is missing required autonomous run flags"
+
+  const mutationPrompt = objectivePrompt
+    ? buildAutonomousPrompt(objectivePrompt, state.latestLearning)
+    : null
+
+  return {
+    wouldRun,
+    wouldSkipReason,
+    selectedObjective: objectivePrompt,
+    mutationPrompt,
+    verificationCommands,
+    evaluationScenarios,
+    config: {
+      enabled: state.config.enabled,
+      paused: state.config.paused,
+      intervalMs: state.config.intervalMs,
+    },
+    lockHeld,
+    runtimeContractCompatible,
+    runtimeContractDetail,
+    pendingObjectives,
   }
 }
 

@@ -92,6 +92,7 @@ describe("plugin tool surface", () => {
       "evolver_autonomous_configure",
       "evolver_autonomous_metrics",
       "evolver_autonomous_pause",
+      "evolver_autonomous_preview",
       "evolver_autonomous_resume",
       "evolver_autonomous_run",
       "evolver_autonomous_start",
