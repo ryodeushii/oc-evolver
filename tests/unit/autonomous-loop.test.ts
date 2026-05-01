@@ -935,6 +935,13 @@ describe("autonomous loop", () => {
         stderr: "scenario boom",
         changedFiles: [],
       },
+      {
+        scenarioName: "objective-proof",
+        exitCode: 1,
+        stdout: "",
+        stderr: "scenario boom",
+        changedFiles: [],
+      },
     ])
   })
 
@@ -1687,16 +1694,174 @@ describe("autonomous loop", () => {
     expect(second.decision).toBe("rejected")
     expect(registry.currentRevision).toBeNull()
     expect(registry.pendingRevision).toBeNull()
-    expect(loopState.lastSessionID).toBe("session-2")
+    expect(loopState.lastSessionID).toBe("session-4")
     expect(loopState.latestLearning?.summary).toContain("verification failed")
     expect(loopState.iterations.at(-1)).toMatchObject({
       decision: "rejected",
       rejectionReason: expect.stringContaining("typecheck"),
     })
+    expect(mutationCommands[2]).toContain("--session")
+    expect(mutationCommands[2]).toContain("session-2")
+    expect(mutationPrompts[2]).toContain("Previous autonomous-loop learning")
+    expect(mutationPrompts[2]).toContain("verification failed")
+  })
+
+  test("repairs a failed verification pass before rejecting the iteration", async () => {
+    const mutationPrompts: string[] = []
+    const mutationCommands: string[][] = []
+    let mutationNumber = 0
+    let verificationNumber = 0
+
+    const result = await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      prompt: "Fix the autonomous review command until typecheck passes.",
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          mutationNumber += 1
+          mutationCommands.push(command)
+          mutationPrompts.push(command.at(-1) ?? "")
+
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: `---\ndescription: Autonomous review ${mutationNumber}\n---\n\nReview autonomously.\n`,
+            },
+          })
+
+          return {
+            stdout: `{"type":"step_start","sessionID":"session-repair-${mutationNumber}"}\n`,
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        verificationNumber += 1
+
+        return verificationNumber === 1
+          ? {
+              stdout: "typecheck failed\n",
+              stderr: "repair me",
+              exitCode: 1,
+            }
+          : {
+              stdout: "typecheck ok\n",
+              stderr: "",
+              exitCode: 0,
+            }
+      },
+      runEvaluationScenario: async () => {
+        throw new Error("evaluation should not run in this test")
+      },
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(result.decision).toBe("promoted")
+    expect(mutationCommands).toHaveLength(2)
     expect(mutationCommands[1]).toContain("--session")
-    expect(mutationCommands[1]).toContain("session-1")
-    expect(mutationPrompts[1]).toContain("Previous autonomous-loop learning")
-    expect(mutationPrompts[1]).toContain("verification failed")
+    expect(mutationCommands[1]).toContain("session-repair-1")
+    expect(mutationPrompts[1]).toContain("Repair the last autonomous attempt")
+    expect(mutationPrompts[1]).toContain("bun run typecheck failed: repair me")
+    expect(status.iterations.at(-1)).toMatchObject({
+      decision: "promoted",
+      sessionID: "session-repair-2",
+    })
+    expect(status.iterations.at(-1)?.verification).toEqual([
+      {
+        command: ["bun", "run", "typecheck"],
+        exitCode: 1,
+        stdout: "typecheck failed\n",
+        stderr: "repair me",
+      },
+      {
+        command: ["bun", "run", "typecheck"],
+        exitCode: 0,
+        stdout: "typecheck ok\n",
+        stderr: "",
+      },
+    ])
+  })
+
+  test("rejects after one bounded repair attempt still fails", async () => {
+    const mutationPrompts: string[] = []
+    let mutationNumber = 0
+
+    const result = await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      prompt: "Keep trying the autonomous review command.",
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          mutationNumber += 1
+          mutationPrompts.push(command.at(-1) ?? "")
+
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: `---\ndescription: Autonomous review ${mutationNumber}\n---\n\nReview autonomously.\n`,
+            },
+          })
+
+          return {
+            stdout: `{"type":"step_start","sessionID":"session-bounded-${mutationNumber}"}\n`,
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "still failing\n",
+          stderr: "same verification error",
+          exitCode: 1,
+        }
+      },
+      runEvaluationScenario: async () => {
+        throw new Error("evaluation should not run after verification failure")
+      },
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(result.decision).toBe("rejected")
+    expect(mutationPrompts).toHaveLength(2)
+    expect(mutationPrompts[1]).toContain("Repair the last autonomous attempt")
+    expect(status.iterations.at(-1)).toMatchObject({
+      decision: "rejected",
+      sessionID: "session-bounded-2",
+      rejectionReason: expect.stringContaining("same verification error"),
+    })
+    expect(status.iterations.at(-1)?.verification).toHaveLength(2)
   })
 
   test("starts scheduled execution through a worker boundary", () => {

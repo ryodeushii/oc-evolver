@@ -232,6 +232,7 @@ const DEFAULT_AUTONOMOUS_LOOP_FAILURE_POLICY: AutonomousLoopFailurePolicy = {
 
 const DEFAULT_AUTONOMOUS_LOOP_PROMPT =
   "Review the current project state, make one concrete improvement, and leave the workspace in a verified state."
+const MAX_AUTONOMOUS_LOOP_REPAIR_ATTEMPTS = 1
 const MAX_ITERATION_HISTORY = 20
 const activeAutonomousLoopWorkers = new Map<string, ActiveAutonomousLoopWorker>()
 
@@ -583,155 +584,213 @@ export async function runAutonomousIteration(
       })
     }
 
-    const mutationCommand = buildAutonomousRunCommand({
-      repoRoot: input.repoRoot,
-      prompt: mutationPrompt,
-      sessionID: state.lastSessionID,
-      runtimeContract: input.runtimeContract,
-    })
     const registryBeforeMutation = await loadRegistry(input.pluginFilePath, input.runtimeContract)
-    const mutationResult = await executeCommand({
-      cwd: input.repoRoot,
-      command: mutationCommand,
-    })
-    const sessionID = extractSessionID(mutationResult.stdout) ?? state.lastSessionID
-    const registryAfterMutation = await loadRegistry(input.pluginFilePath, input.runtimeContract)
-    const pendingRevisionID = registryAfterMutation.pendingRevision
+    const aggregatedVerificationRecords: AutonomousLoopVerificationRecord[] = []
+    const aggregatedEvaluationRecords: AutonomousLoopEvaluationRecord[] = []
+    const basePrompt = objectivePrompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT
+    let currentPrompt = mutationPrompt
+    let currentSessionID = state.lastSessionID
+    let sessionID = state.lastSessionID
+    let pendingRevisionID: string | null = null
+    let registryAfterMutation = registryBeforeMutation
+    let verification = {
+      records: [] as AutonomousLoopVerificationRecord[],
+      failure: null as string | null,
+    }
+    let evaluations = {
+      records: [] as AutonomousLoopEvaluationRecord[],
+      failure: null as string | null,
+    }
 
-    if (mutationResult.exitCode !== 0) {
-      if (pendingRevisionID) {
-        await rejectPendingRevision(input.pluginFilePath, input.runtimeContract)
+    for (let repairAttempt = 0; repairAttempt <= MAX_AUTONOMOUS_LOOP_REPAIR_ATTEMPTS; repairAttempt += 1) {
+      const mutationCommand = buildAutonomousRunCommand({
+        repoRoot: input.repoRoot,
+        prompt: currentPrompt,
+        sessionID: currentSessionID,
+        runtimeContract: input.runtimeContract,
+      })
+      const mutationResult = await executeCommand({
+        cwd: input.repoRoot,
+        command: mutationCommand,
+      })
+
+      sessionID = extractSessionID(mutationResult.stdout) ?? currentSessionID
+      registryAfterMutation = await loadRegistry(input.pluginFilePath, input.runtimeContract)
+      pendingRevisionID = registryAfterMutation.pendingRevision
+
+      if (mutationResult.exitCode !== 0) {
+        if (pendingRevisionID) {
+          await rejectPendingRevision(input.pluginFilePath, input.runtimeContract)
+        }
+
+        return await finalizeAutonomousIteration({
+          pluginFilePath: input.pluginFilePath,
+          runtimeContract: input.runtimeContract,
+          state,
+          iteration: {
+            startedAt,
+            completedAt: new Date().toISOString(),
+            sessionID,
+            decision: "mutation_failed",
+            pendingRevisionID,
+            promotedRevisionID: null,
+            rejectionReason: formatCommandFailure(mutationCommand, mutationResult),
+            prompt: currentPrompt,
+            objectivePrompt,
+            verification: aggregatedVerificationRecords,
+            evaluations: aggregatedEvaluationRecords,
+            changedArtifacts: collectChangedArtifacts(registryAfterMutation, pendingRevisionID),
+          },
+        })
       }
 
-      return await finalizeAutonomousIteration({
-        pluginFilePath: input.pluginFilePath,
-        runtimeContract: input.runtimeContract,
-        state,
-        iteration: {
-          startedAt,
-          completedAt: new Date().toISOString(),
-          sessionID,
-          decision: "mutation_failed",
-          pendingRevisionID,
-          promotedRevisionID: null,
-          rejectionReason: formatCommandFailure(mutationCommand, mutationResult),
-          prompt: mutationPrompt,
-          objectivePrompt,
-          verification: [],
-          evaluations: [],
-          changedArtifacts: collectChangedArtifacts(registryAfterMutation, pendingRevisionID),
-        },
+      if (!pendingRevisionID) {
+        return await finalizeAutonomousIteration({
+          pluginFilePath: input.pluginFilePath,
+          runtimeContract: input.runtimeContract,
+          state,
+          iteration: {
+            startedAt,
+            completedAt: new Date().toISOString(),
+            sessionID,
+            decision: "no_pending_revision",
+            pendingRevisionID: null,
+            promotedRevisionID: null,
+            rejectionReason: null,
+            prompt: currentPrompt,
+            objectivePrompt,
+            verification: aggregatedVerificationRecords,
+            evaluations: aggregatedEvaluationRecords,
+            changedArtifacts: [],
+          },
+        })
+      }
+
+      const changedArtifacts = collectChangedArtifacts(registryAfterMutation, pendingRevisionID)
+      const validation = await validateRegistryArtifacts(input.pluginFilePath, input.runtimeContract)
+
+      if (validation.invalid.length > 0) {
+        const rejectionReason = `registry validation failed: ${validation.invalid[0]?.reason ?? "unknown error"}`
+
+        await rejectPendingRevision(input.pluginFilePath, input.runtimeContract)
+
+        if (repairAttempt < MAX_AUTONOMOUS_LOOP_REPAIR_ATTEMPTS) {
+          currentPrompt = buildAutonomousRepairPrompt({
+            prompt: basePrompt,
+            latestLearning: state.latestLearning,
+            rejectionReason,
+            changedArtifacts,
+          })
+          currentSessionID = sessionID
+          continue
+        }
+
+        return await finalizeAutonomousIteration({
+          pluginFilePath: input.pluginFilePath,
+          runtimeContract: input.runtimeContract,
+          state,
+          iteration: {
+            startedAt,
+            completedAt: new Date().toISOString(),
+            sessionID,
+            decision: "rejected",
+            pendingRevisionID,
+            promotedRevisionID: null,
+            rejectionReason,
+            prompt: currentPrompt,
+            objectivePrompt,
+            verification: aggregatedVerificationRecords,
+            evaluations: aggregatedEvaluationRecords,
+            changedArtifacts,
+          },
+        })
+      }
+
+      verification = await runVerificationCommands({
+        cwd: input.repoRoot,
+        commands: verificationCommands,
+        executeCommand,
       })
-    }
+      aggregatedVerificationRecords.push(...verification.records)
 
-    if (!pendingRevisionID) {
-      return await finalizeAutonomousIteration({
-        pluginFilePath: input.pluginFilePath,
-        runtimeContract: input.runtimeContract,
-        state,
-        iteration: {
-          startedAt,
-          completedAt: new Date().toISOString(),
-          sessionID,
-          decision: "no_pending_revision",
-          pendingRevisionID: null,
-          promotedRevisionID: null,
-          rejectionReason: null,
-          prompt: mutationPrompt,
-          objectivePrompt,
-          verification: [],
-          evaluations: [],
-          changedArtifacts: [],
-        },
+      if (verification.failure) {
+        await rejectPendingRevision(input.pluginFilePath, input.runtimeContract)
+
+        if (repairAttempt < MAX_AUTONOMOUS_LOOP_REPAIR_ATTEMPTS) {
+          currentPrompt = buildAutonomousRepairPrompt({
+            prompt: basePrompt,
+            latestLearning: state.latestLearning,
+            rejectionReason: verification.failure,
+            changedArtifacts,
+          })
+          currentSessionID = sessionID
+          continue
+        }
+
+        return await finalizeAutonomousIteration({
+          pluginFilePath: input.pluginFilePath,
+          runtimeContract: input.runtimeContract,
+          state,
+          iteration: {
+            startedAt,
+            completedAt: new Date().toISOString(),
+            sessionID,
+            decision: "rejected",
+            pendingRevisionID,
+            promotedRevisionID: null,
+            rejectionReason: verification.failure,
+            prompt: currentPrompt,
+            objectivePrompt,
+            verification: aggregatedVerificationRecords,
+            evaluations: aggregatedEvaluationRecords,
+            changedArtifacts,
+          },
+        })
+      }
+
+      evaluations = await runEvaluationScenarios({
+        repoRoot: input.repoRoot,
+        scenarios: evaluationScenarios,
+        runEvaluationScenario: input.runEvaluationScenario,
       })
-    }
+      aggregatedEvaluationRecords.push(...evaluations.records)
 
-    const validation = await validateRegistryArtifacts(input.pluginFilePath, input.runtimeContract)
+      if (evaluations.failure) {
+        await rejectPendingRevision(input.pluginFilePath, input.runtimeContract)
 
-    if (validation.invalid.length > 0) {
-      const rejectionReason = `registry validation failed: ${validation.invalid[0]?.reason ?? "unknown error"}`
+        if (repairAttempt < MAX_AUTONOMOUS_LOOP_REPAIR_ATTEMPTS) {
+          currentPrompt = buildAutonomousRepairPrompt({
+            prompt: basePrompt,
+            latestLearning: state.latestLearning,
+            rejectionReason: evaluations.failure,
+            changedArtifacts,
+          })
+          currentSessionID = sessionID
+          continue
+        }
 
-      await rejectPendingRevision(input.pluginFilePath, input.runtimeContract)
+        return await finalizeAutonomousIteration({
+          pluginFilePath: input.pluginFilePath,
+          runtimeContract: input.runtimeContract,
+          state,
+          iteration: {
+            startedAt,
+            completedAt: new Date().toISOString(),
+            sessionID,
+            decision: "rejected",
+            pendingRevisionID,
+            promotedRevisionID: null,
+            rejectionReason: evaluations.failure,
+            prompt: currentPrompt,
+            objectivePrompt,
+            verification: aggregatedVerificationRecords,
+            evaluations: aggregatedEvaluationRecords,
+            changedArtifacts,
+          },
+        })
+      }
 
-      return await finalizeAutonomousIteration({
-        pluginFilePath: input.pluginFilePath,
-        runtimeContract: input.runtimeContract,
-        state,
-        iteration: {
-          startedAt,
-          completedAt: new Date().toISOString(),
-          sessionID,
-          decision: "rejected",
-          pendingRevisionID,
-          promotedRevisionID: null,
-          rejectionReason,
-          prompt: mutationPrompt,
-          objectivePrompt,
-          verification: [],
-          evaluations: [],
-          changedArtifacts: collectChangedArtifacts(registryAfterMutation, pendingRevisionID),
-        },
-      })
-    }
-
-    const verification = await runVerificationCommands({
-      cwd: input.repoRoot,
-      commands: verificationCommands,
-      executeCommand,
-    })
-
-    if (verification.failure) {
-      await rejectPendingRevision(input.pluginFilePath, input.runtimeContract)
-
-      return await finalizeAutonomousIteration({
-        pluginFilePath: input.pluginFilePath,
-        runtimeContract: input.runtimeContract,
-        state,
-        iteration: {
-          startedAt,
-          completedAt: new Date().toISOString(),
-          sessionID,
-          decision: "rejected",
-          pendingRevisionID,
-          promotedRevisionID: null,
-          rejectionReason: verification.failure,
-          prompt: mutationPrompt,
-          objectivePrompt,
-          verification: verification.records,
-          evaluations: [],
-          changedArtifacts: collectChangedArtifacts(registryAfterMutation, pendingRevisionID),
-        },
-      })
-    }
-
-    const evaluations = await runEvaluationScenarios({
-      repoRoot: input.repoRoot,
-      scenarios: evaluationScenarios,
-      runEvaluationScenario: input.runEvaluationScenario,
-    })
-
-    if (evaluations.failure) {
-      await rejectPendingRevision(input.pluginFilePath, input.runtimeContract)
-
-      return await finalizeAutonomousIteration({
-        pluginFilePath: input.pluginFilePath,
-        runtimeContract: input.runtimeContract,
-        state,
-        iteration: {
-          startedAt,
-          completedAt: new Date().toISOString(),
-          sessionID,
-          decision: "rejected",
-          pendingRevisionID,
-          promotedRevisionID: null,
-          rejectionReason: evaluations.failure,
-          prompt: mutationPrompt,
-          objectivePrompt,
-          verification: verification.records,
-          evaluations: evaluations.records,
-          changedArtifacts: collectChangedArtifacts(registryAfterMutation, pendingRevisionID),
-        },
-      })
+      break
     }
 
     await promotePendingRevision(input.pluginFilePath, input.runtimeContract)
@@ -758,10 +817,10 @@ export async function runAutonomousIteration(
             pendingRevisionID,
             promotedRevisionID: pendingRevisionID,
             rejectionReason: `post-promotion verification failed: ${healthVerification.failure}`,
-            prompt: mutationPrompt,
+            prompt: currentPrompt,
             objectivePrompt,
-            verification: [...verification.records, ...healthVerification.records],
-            evaluations: evaluations.records,
+            verification: [...aggregatedVerificationRecords, ...healthVerification.records],
+            evaluations: aggregatedEvaluationRecords,
             changedArtifacts: collectChangedArtifacts(registryAfterMutation, pendingRevisionID),
           },
         })
@@ -788,10 +847,10 @@ export async function runAutonomousIteration(
             pendingRevisionID,
             promotedRevisionID: pendingRevisionID,
             rejectionReason: `post-promotion evaluation failed: ${healthEvaluations.failure}`,
-            prompt: mutationPrompt,
+            prompt: currentPrompt,
             objectivePrompt,
-            verification: [...verification.records, ...healthVerification.records],
-            evaluations: [...evaluations.records, ...healthEvaluations.records],
+            verification: [...aggregatedVerificationRecords, ...healthVerification.records],
+            evaluations: [...aggregatedEvaluationRecords, ...healthEvaluations.records],
             changedArtifacts: collectChangedArtifacts(registryAfterMutation, pendingRevisionID),
           },
         })
@@ -810,10 +869,10 @@ export async function runAutonomousIteration(
         pendingRevisionID,
         promotedRevisionID: pendingRevisionID,
         rejectionReason: null,
-        prompt: mutationPrompt,
+        prompt: currentPrompt,
         objectivePrompt,
-        verification: verification.records,
-        evaluations: evaluations.records,
+        verification: aggregatedVerificationRecords,
+        evaluations: aggregatedEvaluationRecords,
         changedArtifacts: collectChangedArtifacts(registryAfterMutation, pendingRevisionID),
       },
     })
@@ -937,6 +996,27 @@ function buildAutonomousPrompt(
     "New objective:",
     prompt,
   ].join("\n")
+}
+
+function buildAutonomousRepairPrompt(input: {
+  prompt: string
+  latestLearning: PersistedAutonomousLoopLearning | null
+  rejectionReason: string
+  changedArtifacts: string[]
+}) {
+  const repairPrompt = [
+    input.prompt,
+    "",
+    "Repair the last autonomous attempt.",
+    `Failure: ${input.rejectionReason}`,
+    ...(input.changedArtifacts.length > 0
+      ? ["", "Artifacts changed in the rejected attempt:", ...input.changedArtifacts.map((entry) => `- ${entry}`)]
+      : []),
+    "",
+    "Keep the useful changes, fix the failure, and leave the workspace in a verified state.",
+  ].join("\n")
+
+  return buildAutonomousPrompt(repairPrompt, input.latestLearning)
 }
 
 async function validateAutonomousRuntimeContractCompatibility(input: {
