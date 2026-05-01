@@ -115,6 +115,11 @@ type AutonomousLoopObjective = {
 type PersistedAutonomousLoopLearning = {
   summary: string
   remainingObjectives: string[]
+  lastDecision: AutonomousLoopDecision | null
+  rejectionReason: string | null
+  failedVerificationCommands: string[][]
+  failedEvaluationScenarios: string[]
+  changedArtifacts: string[]
 }
 
 type PersistedAutonomousLoopIteration = {
@@ -236,7 +241,7 @@ const DEFAULT_AUTONOMOUS_LOOP_FAILURE_POLICY: AutonomousLoopFailurePolicy = {
 }
 
 const DEFAULT_AUTONOMOUS_LOOP_PROMPT =
-  "Review the current project state, make one concrete improvement, and leave the workspace in a verified state."
+  "Review the current project state, consult autonomous-loop status and prior learning, make one concrete improvement, and leave the workspace in a verified state."
 const MAX_AUTONOMOUS_LOOP_REPAIR_ATTEMPTS = 1
 const MAX_AUTONOMOUS_LOOP_LOCK_AGE_MS = 60 * 60 * 1000
 const AUTONOMOUS_LOOP_LOCK_METADATA_FILE = "metadata.json"
@@ -1235,9 +1240,40 @@ function buildAutonomousPrompt(
     return prompt
   }
 
+  const structured: string[] = []
+
+  if (latestLearning.lastDecision) {
+    structured.push(`Last decision: ${latestLearning.lastDecision}`)
+  }
+
+  if (latestLearning.rejectionReason) {
+    structured.push(`Rejection reason: ${latestLearning.rejectionReason}`)
+  }
+
+  if (latestLearning.failedVerificationCommands.length > 0) {
+    structured.push(
+      `Failed verification commands: ${latestLearning.failedVerificationCommands
+        .map((command) => formatCommandLabel(command))
+        .join(", ")}`,
+    )
+  }
+
+  if (latestLearning.failedEvaluationScenarios.length > 0) {
+    structured.push(
+      `Failed evaluation scenarios: ${latestLearning.failedEvaluationScenarios.join(", ")}`,
+    )
+  }
+
+  if (latestLearning.changedArtifacts.length > 0) {
+    structured.push(
+      `Artifacts changed in the failed attempt: ${latestLearning.changedArtifacts.join(", ")}`,
+    )
+  }
+
   return [
     "Previous autonomous-loop learning:",
     latestLearning.summary,
+    ...(structured.length > 0 ? ["", ...structured] : []),
     ...(latestLearning.remainingObjectives.length > 0
       ? ["", "Remaining queued objectives:", ...latestLearning.remainingObjectives.map((entry) => `- ${entry}`)]
       : []),
@@ -1670,6 +1706,10 @@ function buildLatestLearning(
   objectives: AutonomousLoopObjective[],
   lastEscalationReason: string | null = null,
 ): PersistedAutonomousLoopLearning | null {
+  const remainingObjectives = objectives
+    .filter((objective) => objective.status === "pending")
+    .map((objective) => objective.prompt)
+
   if (!iteration) {
     return objectives.length === 0
       ? null
@@ -1678,16 +1718,26 @@ function buildLatestLearning(
             lastEscalationReason
               ? `No autonomous iterations have completed yet. ${lastEscalationReason}`
               : "No autonomous iterations have completed yet.",
-          remainingObjectives: objectives.filter((objective) => objective.status === "pending").map((objective) => objective.prompt),
+          remainingObjectives,
+          lastDecision: null,
+          rejectionReason: null,
+          failedVerificationCommands: [],
+          failedEvaluationScenarios: [],
+          changedArtifacts: [],
         }
   }
 
-  const remainingObjectives = objectives
-    .filter((objective) => objective.status === "pending")
-    .map((objective) => objective.prompt)
   const latestObjective = iteration.objectivePrompt
     ? objectives.find((objective) => objective.prompt === iteration.objectivePrompt) ?? null
     : null
+  const failedVerificationCommands = dedupeCommandMatrix(
+    iteration.verification
+      .filter((record) => record.exitCode !== 0)
+      .map((record) => record.command),
+  )
+  const failedEvaluationScenarios = iteration.evaluations
+    .filter((record) => record.exitCode !== 0)
+    .map((record) => record.scenarioName)
 
   if (iteration.decision === "promoted") {
     return {
@@ -1696,6 +1746,11 @@ function buildLatestLearning(
           ? `The last autonomous iteration was promoted at revision ${iteration.promotedRevisionID ?? "unknown"}, but objective "${latestObjective.prompt}" remains pending because ${describePendingObjectiveReason(latestObjective)}.`
           : `The last autonomous iteration was promoted at revision ${iteration.promotedRevisionID ?? "unknown"}.`}${lastEscalationReason ? ` ${lastEscalationReason}` : ""}`,
       remainingObjectives,
+      lastDecision: iteration.decision,
+      rejectionReason: iteration.rejectionReason,
+      failedVerificationCommands,
+      failedEvaluationScenarios,
+      changedArtifacts: iteration.changedArtifacts,
     }
   }
 
@@ -1703,6 +1758,11 @@ function buildLatestLearning(
     return {
       summary: `The last autonomous iteration was promoted and then rolled back: ${iteration.rejectionReason ?? "post-promotion health checks failed"}${lastEscalationReason ? ` ${lastEscalationReason}` : ""}`,
       remainingObjectives,
+      lastDecision: iteration.decision,
+      rejectionReason: iteration.rejectionReason,
+      failedVerificationCommands,
+      failedEvaluationScenarios,
+      changedArtifacts: iteration.changedArtifacts,
     }
   }
 
@@ -1710,12 +1770,22 @@ function buildLatestLearning(
     return {
       summary: `The last autonomous iteration was ${iteration.decision}: ${iteration.rejectionReason}${lastEscalationReason ? ` ${lastEscalationReason}` : ""}`,
       remainingObjectives,
+      lastDecision: iteration.decision,
+      rejectionReason: iteration.rejectionReason,
+      failedVerificationCommands,
+      failedEvaluationScenarios,
+      changedArtifacts: iteration.changedArtifacts,
     }
   }
 
   return {
     summary: `The last autonomous iteration ended with decision ${iteration.decision}.${lastEscalationReason ? ` ${lastEscalationReason}` : ""}`,
     remainingObjectives,
+    lastDecision: iteration.decision,
+    rejectionReason: null,
+    failedVerificationCommands,
+    failedEvaluationScenarios,
+    changedArtifacts: iteration.changedArtifacts,
   }
 }
 
@@ -2164,8 +2234,7 @@ function deriveFollowUpObjectiveFromIteration(input: {
 }): AutonomousLoopObjective | null {
   if (
     !input.iteration.objectivePrompt ||
-    (input.iteration.decision !== "rejected" && input.iteration.decision !== "rolled_back") ||
-    input.existingObjectives.some((objective) => objective.prompt === input.iteration.objectivePrompt)
+    (input.iteration.decision !== "rejected" && input.iteration.decision !== "rolled_back")
   ) {
     return null
   }

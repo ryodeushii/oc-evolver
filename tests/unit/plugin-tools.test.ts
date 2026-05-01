@@ -2018,4 +2018,121 @@ Review only.
     ).resolves.toBeUndefined()
   })
 
+  test("evolver_autonomous_status returns expanded latestLearning in JSON output", async () => {
+    const toolCtx = createToolContext()
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await mkdir(join(workspaceRoot, ".opencode", "oc-evolver"), { recursive: true })
+    await writeFile(
+      join(workspaceRoot, ".opencode", "oc-evolver", "autonomous-loop.json"),
+      `${JSON.stringify(
+        {
+          config: {
+            enabled: true,
+            paused: false,
+            intervalMs: 0,
+            verificationCommands: [["bun", "run", "typecheck"]],
+            evaluationScenarios: [],
+            failurePolicy: {
+              maxConsecutiveFailures: 3,
+              escalationAction: "pause_loop",
+              lastEscalationReason: null,
+            },
+          },
+          lastSessionID: "session-structured-status",
+          latestLearning: null,
+          objectives: [
+            {
+              prompt: "Ship the autonomous review command.",
+              priority: 0,
+              status: "pending",
+              completionCriteria: {
+                changedArtifacts: ["command:autonomous-review"],
+              },
+              lastCompletionEvidence: null,
+              attempts: 1,
+              consecutiveFailures: 1,
+              updatedAt: new Date().toISOString(),
+              lastSessionID: "session-structured-status",
+              lastDecision: "rejected",
+              lastEscalationReason: null,
+            },
+          ],
+          iterations: [
+            {
+              startedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+              sessionID: "session-structured-status",
+              decision: "rejected",
+              pendingRevisionID: null,
+              promotedRevisionID: null,
+              rejectionReason: "bun run typecheck failed: expected 0 type errors but found 1",
+              prompt: "Ship the autonomous review command.",
+              objectivePrompt: "Ship the autonomous review command.",
+              verification: [
+                {
+                  command: ["bun", "run", "typecheck"],
+                  exitCode: 1,
+                  stdout: "verification failed",
+                  stderr: "expected 0 type errors but found 1",
+                },
+              ],
+              evaluations: [
+                {
+                  scenarioName: "autonomous-run",
+                  exitCode: 1,
+                  stdout: "eval failed",
+                  stderr: "regression",
+                  changedFiles: [],
+                },
+              ],
+              changedArtifacts: ["command:autonomous-review"],
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    )
+
+    const resultOutput = await hooks.tool?.evolver_autonomous_status?.execute({}, toolCtx)
+    const result = JSON.parse(toolOutputText(resultOutput)) as {
+      latestLearning: {
+        lastDecision: string | null
+        rejectionReason: string | null
+        failedVerificationCommands: string[][]
+        failedEvaluationScenarios: string[]
+        changedArtifacts: string[]
+      } | null
+      objectives: Array<{ prompt: string }>
+      iterations: Array<{ decision: string }>
+    }
+
+    expect(result.latestLearning).toBeTruthy()
+    expect(result.latestLearning!.lastDecision).toBe("rejected")
+    expect(result.latestLearning!.rejectionReason).toContain("typecheck")
+    expect(result.latestLearning!.failedVerificationCommands).toEqual([["bun", "run", "typecheck"]])
+    expect(result.latestLearning!.failedEvaluationScenarios).toEqual(["autonomous-run"])
+    expect(result.latestLearning!.changedArtifacts).toEqual(["command:autonomous-review"])
+    expect(result.iterations).toHaveLength(1)
+    expect(result.iterations[0]?.decision).toBe("rejected")
+  })
+
 })
