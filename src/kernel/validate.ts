@@ -32,6 +32,8 @@ export type CommandDocument = MarkdownDocument<{
   description: string
   agent?: string
   model?: string
+  memory?: string[]
+  permission?: Record<string, PermissionValue>
 }>
 
 export type MemoryDocument = MarkdownDocument<{
@@ -103,7 +105,7 @@ export function parseAgentDocument(document: string): AgentDocument {
 
   const model = readOptionalString(parsed.frontmatter, "model", "agent")
   const memory = readOptionalStringList(parsed.frontmatter, "memory", "agent")
-  const permission = readPermissionMap(parsed.frontmatter.permission)
+  const permission = readPermissionMap(parsed.frontmatter.permission, "agent")
 
   return {
     frontmatter: {
@@ -123,12 +125,16 @@ export function parseCommandDocument(document: string): CommandDocument {
   const description = readRequiredString(parsed.frontmatter, "description", "command")
   const agent = readOptionalString(parsed.frontmatter, "agent", "command")
   const model = readOptionalString(parsed.frontmatter, "model", "command")
+  const memory = readOptionalStringList(parsed.frontmatter, "memory", "command")
+  const permission = readPermissionMap(parsed.frontmatter.permission, "command")
 
   return {
     frontmatter: {
       description,
       ...(agent ? { agent } : {}),
       ...(model ? { model } : {}),
+      ...(memory ? { memory } : {}),
+      ...(permission ? { permission } : {}),
     },
     body: parsed.body,
     raw: parsed.raw,
@@ -262,13 +268,13 @@ function readOptionalStringList(
   })
 }
 
-function readPermissionMap(value: unknown) {
+function readPermissionMap(value: unknown, artifactKind: string) {
   if (value === undefined) {
     return undefined
   }
 
   if (!isPlainObject(value)) {
-    throw new Error("invalid agent document: permission must be an object")
+    throw new Error(`invalid ${artifactKind} document: permission must be an object`)
   }
 
   const permissionEntries = Object.entries(value)
@@ -276,9 +282,7 @@ function readPermissionMap(value: unknown) {
 
   for (const [toolName, toolPermission] of permissionEntries) {
     if (!isPermissionValue(toolPermission)) {
-      throw new Error(
-        "invalid agent document: permission values must be allow, ask, or deny",
-      )
+      throw new Error(`invalid ${artifactKind} document: permission values must be allow, ask, or deny`)
     }
 
     permission[toolName] = toolPermission

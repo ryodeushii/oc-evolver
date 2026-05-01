@@ -586,4 +586,410 @@ Focus on correctness and risk.
     const auditLog = await readFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "utf8")
     expect(auditLog).toContain("run_command")
   })
+
+  test("evolver_run_command uses command-owned memory and permission metadata", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async (payload: unknown) => {
+            promptCalls.push(payload)
+            return { info: {}, parts: [] }
+          },
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_memory?.execute(
+      {
+        memoryName: "command-preferences",
+        document: `---
+name: command-preferences
+description: Command-owned memory routing
+sources:
+  - memory://plans/oc-evolver/*
+---
+
+Prefer command-owned guidance.
+`,
+      },
+      {
+        sessionID: "session-command-owned",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_write_command?.execute(
+      {
+        commandName: "review-markdown",
+        document: `---
+description: Review markdown files
+model: openai/gpt-5.4
+memory:
+  - command-preferences
+permission:
+  edit: deny
+---
+
+Focus on correctness and risk.
+`,
+      },
+      {
+        sessionID: "session-command-owned",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_run_command?.execute(
+      {
+        commandName: "review-markdown",
+        prompt: "Review README.md and summarize the risk.",
+      },
+      {
+        sessionID: "session-command-owned",
+        messageID: "message-3",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    expect(promptCalls).toHaveLength(2)
+    expect(JSON.stringify(promptCalls[1])).toContain("command-preferences")
+    expect(JSON.stringify(promptCalls[1])).toContain("Prefer command-owned guidance")
+    expect(JSON.stringify(promptCalls[1])).toContain("Preferred model: openai/gpt-5.4")
+
+    const permissionOutput: { status: "ask" | "deny" | "allow" } = {
+      status: "ask",
+    }
+
+    await hooks["permission.ask"]?.(
+      {
+        id: "perm-command-1",
+        type: "edit",
+        pattern: ".opencode/commands/review.md",
+        sessionID: "session-command-owned",
+        messageID: "message-4",
+        title: "Edit file while command restricted",
+        metadata: {},
+        time: {
+          created: Date.now(),
+        },
+      },
+      permissionOutput,
+    )
+
+    expect(permissionOutput.status).toBe("deny")
+  })
+
+  test("evolver_run_command does not persist command-owned runtime state when the prompt fails", async () => {
+    const hooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async (payload: unknown) => {
+            promptCalls.push(payload)
+
+            if (promptCalls.length > 1) {
+              throw new Error("prompt failed")
+            }
+
+            return { info: {}, parts: [] }
+          },
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await hooks.tool?.evolver_write_memory?.execute(
+      {
+        memoryName: "command-preferences",
+        document: `---
+name: command-preferences
+description: Command-owned memory routing
+sources:
+  - memory://plans/oc-evolver/*
+---
+
+Prefer command-owned guidance.
+`,
+      },
+      {
+        sessionID: "session-command-failure",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await hooks.tool?.evolver_write_command?.execute(
+      {
+        commandName: "review-markdown",
+        document: `---
+description: Review markdown files
+memory:
+  - command-preferences
+permission:
+  edit: deny
+---
+
+Focus on correctness and risk.
+`,
+      },
+      {
+        sessionID: "session-command-failure",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await expect(
+      hooks.tool?.evolver_run_command?.execute(
+        {
+          commandName: "review-markdown",
+          prompt: "Review README.md and summarize the risk.",
+        },
+        {
+          sessionID: "session-command-failure",
+          messageID: "message-3",
+          agent: "main",
+          directory: workspaceRoot,
+          worktree: workspaceRoot,
+          abort: new AbortController().signal,
+          metadata() {},
+          ask() {
+            throw new Error("not implemented")
+          },
+        },
+      ),
+    ).rejects.toThrow("prompt failed")
+
+    const permissionOutput: { status: "ask" | "deny" | "allow" } = {
+      status: "ask",
+    }
+
+    await hooks["permission.ask"]?.(
+      {
+        id: "perm-command-failure-1",
+        type: "edit",
+        pattern: ".opencode/commands/review.md",
+        sessionID: "session-command-failure",
+        messageID: "message-4",
+        title: "Edit file after failed command",
+        metadata: {},
+        time: {
+          created: Date.now(),
+        },
+      },
+      permissionOutput,
+    )
+
+    expect(permissionOutput.status).toBe("ask")
+
+    const failedSessionState = JSON.parse(
+      await readFile(
+        join(
+          workspaceRoot,
+          ".opencode/oc-evolver/sessions",
+          `${encodeURIComponent("session-command-failure")}.json`,
+        ),
+        "utf8",
+      ),
+    ) as {
+      memories?: Record<string, unknown>
+      runtimePolicy?: unknown
+    }
+
+    expect(failedSessionState.memories ?? {}).not.toHaveProperty("command-preferences")
+    expect(failedSessionState.runtimePolicy).toBeUndefined()
+  })
+
+  test("evolver_run_command persists command-owned runtime policy across a fresh plugin instance", async () => {
+    const firstHooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async (payload: unknown) => {
+            promptCalls.push(payload)
+            return { info: {}, parts: [] }
+          },
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    await firstHooks.tool?.evolver_write_command?.execute(
+      {
+        commandName: "review-markdown",
+        document: `---
+description: Review markdown files
+permission:
+  edit: deny
+---
+
+Focus on correctness and risk.
+`,
+      },
+      {
+        sessionID: "session-command-persisted",
+        messageID: "message-1",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    await firstHooks.tool?.evolver_run_command?.execute(
+      {
+        commandName: "review-markdown",
+        prompt: "Review README.md and summarize the risk.",
+      },
+      {
+        sessionID: "session-command-persisted",
+        messageID: "message-2",
+        agent: "main",
+        directory: workspaceRoot,
+        worktree: workspaceRoot,
+        abort: new AbortController().signal,
+        metadata() {},
+        ask() {
+          throw new Error("not implemented")
+        },
+      },
+    )
+
+    const persistedSessionState = JSON.parse(
+      await readFile(
+        join(
+          workspaceRoot,
+          ".opencode/oc-evolver/sessions",
+          `${encodeURIComponent("session-command-persisted")}.json`,
+        ),
+        "utf8",
+      ),
+    ) as {
+      memories?: Record<string, { storageMode?: string }>
+      runtimePolicy?: {
+        sourceKind?: string
+        sourceName?: string
+        toolPermissions?: Record<string, string>
+      }
+    }
+
+    expect(persistedSessionState.runtimePolicy).toMatchObject({
+      sourceKind: "command",
+      sourceName: "review-markdown",
+      toolPermissions: {
+        edit: "deny",
+      },
+    })
+
+    const secondHooks = await OCEvolverPlugin({
+      client: {
+        session: {
+          prompt: async () => ({ info: {}, parts: [] }),
+        },
+      },
+      project: {
+        id: "fixture-project",
+        worktree: workspaceRoot,
+      },
+      directory: workspaceRoot,
+      worktree: workspaceRoot,
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as never,
+    } as never)
+
+    const permissionOutput: { status: "ask" | "deny" | "allow" } = {
+      status: "ask",
+    }
+
+    await secondHooks["permission.ask"]?.(
+      {
+        id: "perm-command-persisted-1",
+        type: "edit",
+        pattern: ".opencode/commands/review.md",
+        sessionID: "session-command-persisted",
+        messageID: "message-3",
+        title: "Edit file after resumed command session",
+        metadata: {},
+        time: {
+          created: Date.now(),
+        },
+      },
+      permissionOutput,
+    )
+
+    expect(permissionOutput.status).toBe("deny")
+  })
 })

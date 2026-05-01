@@ -140,12 +140,16 @@ Review markdown changes before they land.
     ).toThrow(/agent.+mode/i)
   })
 
-  test("parses a valid command document with optional agent binding", () => {
+  test("parses a valid command document with memory and permission metadata", () => {
     expect(
       parseCommandDocument(`---
 description: Run markdown review
 agent: fixture-reviewer
 model: anthropic/claude-sonnet-4-20250514
+memory:
+  - project-preferences
+permission:
+  edit: deny
 ---
 
 Review README.md and summarize changes.
@@ -155,6 +159,10 @@ Review README.md and summarize changes.
         description: "Run markdown review",
         agent: "fixture-reviewer",
         model: "anthropic/claude-sonnet-4-20250514",
+        memory: ["project-preferences"],
+        permission: {
+          edit: "deny",
+        },
       },
       body: expect.stringContaining("Review README.md"),
     })

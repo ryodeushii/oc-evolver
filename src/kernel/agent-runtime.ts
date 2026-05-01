@@ -304,27 +304,20 @@ export async function runCommandInSession(input: {
           runtimeContract: input.runtimeContract,
           sessionID: input.sessionID,
         }),
+      commandProfile.document.frontmatter.memory ?? [],
       agentProfile?.document.frontmatter.memory ?? [],
     ),
   })
 
-  await rememberLoadedMemoryProfiles({
-    pluginFilePath: input.pluginFilePath,
-    runtimeContract: input.runtimeContract,
-    sessionID: input.sessionID,
-    memoryProfiles,
-  })
-  await rememberSessionRuntimePolicy({
-    pluginFilePath: input.pluginFilePath,
-    runtimeContract: input.runtimeContract,
-    sessionID: input.sessionID,
-    runtimePolicy: {
-      sourceKind: "command",
-      sourceName: commandProfile.name,
-      toolPermissions: agentProfile?.document.frontmatter.permission ?? {},
-      ...(preferredModel ? { preferredModel } : {}),
+  const runtimePolicy: SessionRuntimePolicy = {
+    sourceKind: "command",
+    sourceName: commandProfile.name,
+    toolPermissions: {
+      ...(agentProfile?.document.frontmatter.permission ?? {}),
+      ...(commandProfile.document.frontmatter.permission ?? {}),
     },
-  })
+    ...(preferredModel ? { preferredModel } : {}),
+  }
 
   const systemSections = [
     `Run command: ${commandProfile.name}`,
@@ -349,6 +342,20 @@ export async function runCommandInSession(input: {
       parts: [{ type: "text", text: input.prompt }],
     },
   })
+
+  await rememberLoadedMemoryProfiles({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    memoryProfiles,
+  })
+  await rememberSessionRuntimePolicy({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    sessionID: input.sessionID,
+    runtimePolicy,
+  })
+
   await appendAuditEvent({
     pluginFilePath: input.pluginFilePath,
     runtimeContract: input.runtimeContract,
