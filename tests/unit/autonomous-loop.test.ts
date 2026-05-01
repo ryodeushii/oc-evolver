@@ -1337,6 +1337,68 @@ describe("autonomous loop", () => {
     })
   })
 
+  test("enqueues a deterministic follow-up objective from a rejected ad-hoc iteration", async () => {
+    const result = await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      prompt: "Write the autonomous review command and keep the loop green.",
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: "---\ndescription: Autonomous review\n---\n\nReview autonomously.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-follow-up-rejected"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "verification failed\n",
+          stderr: "",
+          exitCode: 1,
+        }
+      },
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(result.decision).toBe("rejected")
+    expect(status.objectives).toHaveLength(1)
+    expect(status.objectives[0]).toMatchObject({
+      status: "pending",
+      attempts: 0,
+      consecutiveFailures: 0,
+      completionCriteria: {
+        changedArtifacts: ["command:autonomous-review"],
+        verificationCommands: [["bun", "run", "typecheck"]],
+      },
+    })
+    expect(status.objectives[0]?.prompt).toContain("Write the autonomous review command and keep the loop green.")
+    expect(status.objectives[0]?.prompt).toContain("bun run typecheck")
+    expect(status.latestLearning?.remainingObjectives).toEqual([status.objectives[0]!.prompt])
+  })
+
   test("does not attach a stale session to pre-mutation evaluator rejection", async () => {
     await mkdir(join(repoRoot, ".opencode", "oc-evolver"), { recursive: true })
     await writeFile(

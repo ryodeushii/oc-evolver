@@ -1192,7 +1192,13 @@ async function finalizeAutonomousIteration(input: {
   state: PersistedAutonomousLoopState
   iteration: PersistedAutonomousLoopIteration
 }): Promise<AutonomousLoopIterationResult> {
-  const nextObjectives = updateObjectivesAfterIteration(input.state.objectives, input.iteration)
+  const nextObjectives = enqueueDerivedObjective(
+    updateObjectivesAfterIteration(input.state.objectives, input.iteration),
+    deriveFollowUpObjectiveFromIteration({
+      existingObjectives: input.state.objectives,
+      iteration: input.iteration,
+    }),
+  )
   const escalation = applyFailureEscalation({
     config: input.state.config,
     objectives: nextObjectives,
@@ -1795,6 +1801,96 @@ function updateObjectivesAfterIteration(
           : objective.lastEscalationReason,
     }
   })
+}
+
+function deriveFollowUpObjectiveFromIteration(input: {
+  existingObjectives: AutonomousLoopObjective[]
+  iteration: PersistedAutonomousLoopIteration
+}): AutonomousLoopObjective | null {
+  if (
+    !input.iteration.objectivePrompt ||
+    (input.iteration.decision !== "rejected" && input.iteration.decision !== "rolled_back") ||
+    input.existingObjectives.some((objective) => objective.prompt === input.iteration.objectivePrompt)
+  ) {
+    return null
+  }
+
+  const completionCriteria = normalizeObjectiveCompletionCriteria({
+    changedArtifacts: input.iteration.changedArtifacts,
+    evaluationScenarios: input.iteration.evaluations
+      .filter((record) => record.exitCode !== 0)
+      .map((record) => record.scenarioName),
+    verificationCommands: input.iteration.verification
+      .filter((record) => record.exitCode !== 0)
+      .map((record) => record.command),
+  })
+
+  if (!completionCriteria) {
+    return null
+  }
+
+  return {
+    prompt: buildAutonomousFailureObjectivePrompt({
+      objectivePrompt: input.iteration.objectivePrompt,
+      rejectionReason: input.iteration.rejectionReason,
+      completionCriteria,
+    }),
+    status: "pending",
+    completionCriteria,
+    lastCompletionEvidence: null,
+    attempts: 0,
+    consecutiveFailures: 0,
+    updatedAt: input.iteration.completedAt,
+    lastSessionID: null,
+    lastDecision: null,
+    lastEscalationReason: null,
+  }
+}
+
+function enqueueDerivedObjective(
+  objectives: AutonomousLoopObjective[],
+  derivedObjective: AutonomousLoopObjective | null,
+) {
+  if (!derivedObjective || objectives.some((objective) => objective.prompt === derivedObjective.prompt)) {
+    return objectives
+  }
+
+  return [...objectives, derivedObjective]
+}
+
+function buildAutonomousFailureObjectivePrompt(input: {
+  objectivePrompt: string
+  rejectionReason: string | null
+  completionCriteria: AutonomousLoopObjectiveCompletionCriteria
+}) {
+  const lines = [
+    `Repair the failed autonomous attempt for objective: ${input.objectivePrompt}`,
+    `Failure: ${input.rejectionReason ?? "autonomous loop failure"}`,
+  ]
+
+  if ((input.completionCriteria.changedArtifacts ?? []).length > 0) {
+    lines.push(
+      `Changed artifacts to preserve and repair: ${(input.completionCriteria.changedArtifacts ?? []).join(", ")}`,
+    )
+  }
+
+  if ((input.completionCriteria.verificationCommands ?? []).length > 0) {
+    lines.push(
+      `Verification commands that must pass: ${(input.completionCriteria.verificationCommands ?? [])
+        .map((command) => formatCommandLabel(command))
+        .join(", ")}`,
+    )
+  }
+
+  if ((input.completionCriteria.evaluationScenarios ?? []).length > 0) {
+    lines.push(
+      `Evaluation scenarios that must pass: ${(input.completionCriteria.evaluationScenarios ?? []).join(", ")}`,
+    )
+  }
+
+  lines.push("Keep the useful mutable changes and bring the loop back to a verified state.")
+
+  return lines.join("\n")
 }
 
 function applyFailureEscalation(input: {

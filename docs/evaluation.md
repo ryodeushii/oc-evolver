@@ -131,6 +131,8 @@ Key files:
   - `lastCompletionEvidence.passedEvaluationScenarios` contains both the baseline and objective-specific scenarios
   - `autonomous-loop.json.latestLearning.summary` describes a promoted iteration
 
+Rejected or rolled-back ad-hoc iterations now leave behind a deterministic queued follow-up objective when the loop has explicit failure evidence to reuse. The synthesized objective reuses the failed iteration's changed artifacts plus failed verification commands and evaluation scenarios as explicit completion criteria, so later runs can continue from recorded evidence without manual queue edits.
+
 ### `objective-memory-evidence`
 
 - Runs exactly one nested objective-evaluation turn as a status-only proof helper for `autonomous-run`
