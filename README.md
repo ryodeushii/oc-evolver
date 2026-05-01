@@ -77,6 +77,9 @@ The plugin exposes this stable v1 tool surface:
 - `evolver_autonomous_pause`
 - `evolver_autonomous_resume`
 - `evolver_autonomous_run`
+- `evolver_autonomous_stop`
+- `evolver_autonomous_metrics`
+- `evolver_autonomous_preview`
 - `evolver_run_agent`
 - `evolver_run_command`
 - `evolver_delete_artifact`
@@ -89,7 +92,7 @@ Mutable writes now land as pending revisions. In the interactive/operator flow, 
 
 Use `evolver_review_pending` when you need the actual pending-vs-current revision contents and a grouped artifact-change summary before promoting or rejecting a staged revision.
 
-The autonomous loop now has plugin-native control-plane tools. `evolver_autonomous_configure` persists queued objectives, verification commands, eval scenarios, schedule state, and a failure policy under the active OpenCode config root's `oc-evolver/autonomous-loop.json` (for example `.opencode/oc-evolver/autonomous-loop.json` in repo-backed/eval fixtures). Objectives can also declare their own `completionCriteria.verificationCommands` when a specific gate must pass before that objective can be marked complete. The failure policy tracks consecutive objective failures and can either auto-pause the loop or quarantine the repeatedly failing objective after the configured threshold. `pause_loop` leaves `config.paused=true`, and subsequent runs surface `skipped_paused` until `evolver_autonomous_resume` clears that state. `quarantine_objective` changes the objective status to `quarantined`, which removes it from normal objective selection while leaving its escalation reason visible in status. Rejected or rolled-back ad-hoc iterations now also synthesize a deterministic follow-up objective when the loop has enough evidence to do so, reusing the recorded changed artifacts and failed verification/evaluation gates instead of relying on manual queue reconfiguration. `evolver_autonomous_start`, `evolver_autonomous_pause`, and `evolver_autonomous_resume` control scheduled workers through that persisted state, while `evolver_autonomous_run` executes one iteration immediately and `evolver_autonomous_status` reports the queue, latest learning, the most recent escalation reason, and recent iteration artifacts.
+The autonomous loop now has plugin-native control-plane tools. `evolver_autonomous_configure` persists objectives, verification commands, eval scenarios, schedule state, and a failure policy under the active OpenCode config root's `oc-evolver/autonomous-loop.json` (for example `.opencode/oc-evolver/autonomous-loop.json` in repo-backed/eval fixtures). Today the loop is still primarily objective-driven rather than fully self-directing: it selects the highest-priority pending objective from the persisted queue, preserves deterministic repair objectives from failed ad-hoc or queued iterations, and when the queue is otherwise empty it can also synthesize bounded objectives from durable evidence such as invalid mutable artifacts or the latest failed default-prompt iteration. Objectives can also declare their own `completionCriteria.verificationCommands` when a specific gate must pass before that objective can be marked complete. The failure policy tracks consecutive objective failures and can either auto-pause the loop or quarantine the repeatedly failing objective after the configured threshold. `pause_loop` leaves `config.paused=true`, and subsequent runs surface `skipped_paused` until `evolver_autonomous_resume` clears that state. `quarantine_objective` changes the objective status to `quarantined`, which removes it from normal objective selection while leaving its escalation reason visible in status. `evolver_autonomous_start`, `evolver_autonomous_pause`, `evolver_autonomous_resume`, and `evolver_autonomous_stop` manage scheduled execution, `evolver_autonomous_run` executes one iteration immediately, `evolver_autonomous_preview` reports whether the next iteration would run plus the selected objective/prompt, source, rationale, and merged verification/eval gates, `evolver_autonomous_metrics` summarizes loop history, and `evolver_autonomous_status` reports the queue, latest learning, the most recent escalation reason, and recent iteration artifacts.
 
 For a closed-loop path, `bun run autonomous:run` drives `opencode run` against the real repo, reuses the last continued session, persists richer loop learning plus iteration history under `.opencode/oc-evolver/autonomous-loop.json`, runs the default verification gates (`bun run typecheck`, `bun run test:unit`), runs the dedicated `autonomous-run` eval by default, and then auto-promotes, auto-rejects, or rolls back a newly accepted revision if post-promotion health regresses. Scheduled runs now use both a worker-local in-flight guard and a durable lock at `.opencode/oc-evolver/autonomous-loop.lock`. That lock now records acquisition metadata and will only be reclaimed automatically when the metadata proves the lock has gone stale; otherwise the next run still returns `skipped_locked`. Pass `--worker` to keep that loop on a Worker-backed 15-minute schedule by default, or override the cadence with `--interval-ms <ms>`.
 
@@ -100,6 +103,148 @@ Lifecycle cleanup is also plugin-native: `evolver_delete_artifact` stages a dele
 Memory profiles are versioned markdown artifacts stored under `.opencode/memory/`. They steer session behavior by injecting Basic Memory routing guidance, optional `storage_mode`, and reusable source/query hints into skill and agent composition without copying the underlying Basic Memory note corpus into the kernel registry.
 
 If a session applies a memory profile with `storage_mode: artifact-only`, the plugin denies Basic Memory mutation tools for that session through `tool.execute.before`.
+
+## Architecture
+
+The README uses Mermaid as the canonical diagram format for the plugin architecture and evolution loop. The diagrams below describe the current implementation first, and call out planned self-directed behavior explicitly when it does not exist yet.
+
+### Plugin architecture
+
+```mermaid
+flowchart TD
+    User[Operator or model] --> OpenCode[OpenCode session]
+    OpenCode --> Plugin[src/oc-evolver.ts]
+
+    Plugin --> Tools[Tool registrations]
+    Plugin --> Hooks[Permission and tool hooks]
+
+    Tools --> Registry[src/kernel/registry.ts]
+    Tools --> Loop[src/kernel/autonomous-loop.ts]
+    Tools --> Runtime[src/kernel/agent-runtime.ts]
+    Tools --> Validate[src/kernel/validate.ts]
+    Tools --> Materialize[src/kernel/materialize.ts]
+
+    Hooks --> Policy[src/kernel/policy.ts]
+    Hooks --> Audit[src/kernel/audit.ts]
+    Runtime --> SessionState[src/kernel/session-state.ts]
+    Runtime --> OperatorGuide[src/kernel/operator-guide.ts]
+
+    Registry --> MutableRoots[Mutable roots]
+    Materialize --> MutableRoots
+    Policy --> ProtectedPaths[Protected paths]
+    Audit --> AuditLog[.opencode/oc-evolver/audit.ndjson]
+    Loop --> LoopState[.opencode/oc-evolver/autonomous-loop.json]
+
+    MutableRoots --> Skills[.opencode/skills]
+    MutableRoots --> Agents[.opencode/agent]
+    MutableRoots --> Commands[.opencode/commands]
+    MutableRoots --> Memories[.opencode/memory]
+    MutableRoots --> KernelState[.opencode/oc-evolver]
+```
+
+`src/oc-evolver.ts` is the kernel entrypoint. It exposes the stable tool surface, restores persisted control-plane state, and routes operations into the kernel modules. `registry.ts`, `materialize.ts`, and `validate.ts` own artifact durability and revision semantics. `policy.ts` enforces the mutable-root boundary, while `audit.ts` records durable evidence for operator review and eval assertions. The autonomous loop and runtime composition stay inside that same kernel boundary instead of letting the model rewrite the plugin itself.
+
+### Revision lifecycle
+
+```mermaid
+sequenceDiagram
+    participant Model as Model or operator
+    participant Plugin as oc-evolver tools
+    participant Registry as registry.ts
+    participant Files as Mutable artifacts
+    participant Audit as audit.ndjson
+
+    Model->>Plugin: evolver_write_* / evolver_delete_artifact
+    Plugin->>Registry: stage pending revision
+    Registry->>Files: materialize candidate artifacts
+    Registry->>Audit: write_* / delete_artifact
+
+    Model->>Plugin: evolver_review_pending
+    Plugin->>Registry: load pending vs accepted state
+    Registry-->>Model: grouped artifact diff and review snapshot
+
+    alt Promote
+        Model->>Plugin: evolver_promote
+        Plugin->>Registry: accept pending revision
+        Registry->>Audit: promote
+    else Reject
+        Model->>Plugin: evolver_reject
+        Plugin->>Registry: discard pending revision
+        Registry->>Audit: reject
+    else Rollback
+        Model->>Plugin: evolver_rollback
+        Plugin->>Registry: restore previous accepted revision
+        Registry->>Audit: rollback
+    end
+```
+
+Mutable artifacts are never edited in place without revision context. The registry is the authority for `pendingRevision`, `currentRevision`, accepted history, prune eligibility, and rollback safety. That design keeps operator review explicit even when the model is the one proposing the artifact change.
+
+### Autonomous iteration
+
+```mermaid
+flowchart TD
+    Start[Start or run iteration] --> Load[Load loop state and lock status]
+    Load --> Resolve[Resolve next objective or fallback prompt]
+    Resolve --> Runnable{Enabled, unpaused,<br/>lock free, runtime compatible?}
+
+    Runnable -- No --> Skip[Record skipped outcome]
+    Runnable -- Yes --> Mutate[Run opencode mutation session]
+    Mutate --> Pending{Pending revision created?}
+
+    Pending -- No --> NoPending[Record no_pending_revision or mutation_failed]
+    Pending -- Yes --> Verify[Run verification commands]
+    Verify --> VerifyPass{Verification passed?}
+
+    VerifyPass -- No --> Repair[Attempt bounded repair]
+    Repair --> Reverify[Re-run verification]
+    Reverify --> RepairPass{Verification passed after repair?}
+    RepairPass -- No --> Reject[Reject pending revision]
+    RepairPass -- Yes --> Eval
+
+    VerifyPass -- Yes --> Eval[Run evaluation scenarios]
+    Eval --> EvalPass{Evaluation passed?}
+
+    EvalPass -- No --> Reject
+    EvalPass -- Yes --> Promote[Promote pending revision]
+    Promote --> PostVerify[Run post-promotion verification and eval]
+    PostVerify --> Healthy{Accepted state still healthy?}
+
+    Healthy -- No --> Rollback[Rollback promoted revision]
+    Healthy -- Yes --> Complete[Persist success state]
+
+    Reject --> Learn[Persist learning and completion evidence]
+    Rollback --> Learn
+    Skip --> Learn
+    NoPending --> Learn
+    Complete --> Learn
+    Reject --> FollowUp[Derive follow-up repair objective when failure evidence is explicit]
+    Rollback --> FollowUp
+```
+
+The loop is designed to stay bounded and auditable. It records verification and evaluation evidence, keeps repair attempts limited, and only auto-queues a follow-up objective when the evidence is concrete enough to restate as an explicit artifact-and-gate objective. Promotion is not the terminal success condition by itself; post-promotion health still has to hold or the loop rolls the accepted state back.
+
+### Objective sourcing
+
+```mermaid
+flowchart TD
+    Begin[Need next autonomous objective] --> Manual{Pending manual objective exists?}
+    Manual -- Yes --> ManualPick[Select highest-priority pending objective]
+    Manual -- No --> Repair{Pending repair objective exists?}
+    Repair -- Yes --> RepairPick[Reuse deterministic failed-iteration repair objective]
+    Repair -- No --> Invalid{Invalid mutable artifacts detected?}
+    Invalid -- Yes --> InvalidPick[Derive invalid-artifact repair objective]
+    Invalid -- No --> Learning{Latest failed default-prompt learning available?}
+    Learning -- Yes --> LearningPick[Derive learning-backed repair objective]
+    Learning -- No --> Health{Additional health-derived bounded objective available?}
+    Health -- Yes --> HealthPick[Planned self-directed objective source]
+    Health -- No --> Fallback[Use default autonomous improvement prompt]
+
+    classDef planned stroke-dasharray: 5 5;
+    class Health,HealthPick planned;
+```
+
+Current behavior is the solid manual-repair-invalid-learning-fallback branch: queued manual objectives first, then pending repair objectives from failed iterations, then invalid-artifact repairs, then learning-backed repairs from the latest failed default-prompt run, then the generic fallback prompt. The dashed health-derived branch is the next planned step. The intent is to make the loop more self-directed without making it speculative: proposed objectives should come from durable evidence such as invalid mutable artifacts, persisted loop failures, or other bounded registry-health signals, not from unconstrained brainstorming.
 
 ## Local commands
 

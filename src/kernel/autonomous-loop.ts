@@ -98,10 +98,14 @@ type AutonomousLoopEvaluationRecord = {
   changedFiles: string[]
 }
 
+type AutonomousLoopObjectiveSource = "manual" | "repair" | "invalid_artifact" | "learning"
+
 type AutonomousLoopObjective = {
   prompt: string
   priority: number
   status: "pending" | "completed" | "quarantined"
+  source: AutonomousLoopObjectiveSource
+  rationale: string | null
   completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
   lastCompletionEvidence: AutonomousLoopObjectiveCompletionEvidence | null
   attempts: number
@@ -299,7 +303,13 @@ export async function configureAutonomousLoop(input: {
     state: nextState,
   })
 
-  return formatAutonomousLoopStatus(nextState)
+  return formatAutonomousLoopStatus(
+    await refreshDerivedObjectives({
+      pluginFilePath: input.pluginFilePath,
+      runtimeContract: input.runtimeContract,
+      state: nextState,
+    }),
+  )
 }
 
 export async function getAutonomousLoopStatus(input: {
@@ -309,7 +319,7 @@ export async function getAutonomousLoopStatus(input: {
   await ensureKernelRuntimePaths(input.pluginFilePath, input.runtimeContract)
 
   return formatAutonomousLoopStatus(
-    await loadAutonomousLoopState(input.pluginFilePath, input.runtimeContract),
+    await loadAutonomousLoopStateWithDerivedObjectives(input.pluginFilePath, input.runtimeContract),
   )
 }
 
@@ -379,7 +389,10 @@ export async function getAutonomousLoopMetrics(input: {
 }): Promise<AutonomousLoopMetrics> {
   await ensureKernelRuntimePaths(input.pluginFilePath, input.runtimeContract)
 
-  const state = await loadAutonomousLoopState(input.pluginFilePath, input.runtimeContract)
+  const state = await loadAutonomousLoopStateWithDerivedObjectives(
+    input.pluginFilePath,
+    input.runtimeContract,
+  )
 
   return computeAutonomousLoopMetrics(state)
 }
@@ -452,6 +465,8 @@ export type AutonomousLoopPreview = {
   wouldRun: boolean
   wouldSkipReason: string | null
   selectedObjective: string | null
+  selectedObjectiveSource: AutonomousLoopObjectiveSource | null
+  selectedObjectiveRationale: string | null
   mutationPrompt: string | null
   verificationCommands: string[][]
   evaluationScenarios: string[]
@@ -466,6 +481,11 @@ export type AutonomousLoopPreview = {
   pendingObjectives: string[]
 }
 
+type ResolvedAutonomousObjective = {
+  objectivePrompt: string | null
+  mutationPrompt: string
+}
+
 export async function previewAutonomousIteration(input: {
   pluginFilePath: string
   runtimeContract: OCEvolverRuntimeContract
@@ -473,7 +493,10 @@ export async function previewAutonomousIteration(input: {
 }): Promise<AutonomousLoopPreview> {
   await ensureKernelRuntimePaths(input.pluginFilePath, input.runtimeContract)
 
-  const state = await loadAutonomousLoopState(input.pluginFilePath, input.runtimeContract)
+  const state = await loadAutonomousLoopStateWithDerivedObjectives(
+    input.pluginFilePath,
+    input.runtimeContract,
+  )
   const lockPath = resolveAutonomousLoopLockPath(input.pluginFilePath, input.runtimeContract)
   let lockHeld = false
 
@@ -484,7 +507,11 @@ export async function previewAutonomousIteration(input: {
     lockHeld = false
   }
 
-  const objectivePrompt = selectObjectivePrompt(state, input.prompt)
+  const resolvedObjective = resolveAutonomousObjective(state, input.prompt)
+  const objectivePrompt = resolvedObjective.objectivePrompt
+  const selectedObjective = objectivePrompt
+    ? state.objectives.find((objective) => objective.prompt === objectivePrompt) ?? null
+    : null
   const pendingObjectives = state.objectives
     .filter((o) => o.status === "pending")
     .map((o) => o.prompt)
@@ -515,9 +542,6 @@ export async function previewAutonomousIteration(input: {
   } else if (lockHeld) {
     wouldRun = false
     wouldSkipReason = "autonomous loop lock is already held (another iteration may be running)"
-  } else if (!objectivePrompt) {
-    wouldRun = false
-    wouldSkipReason = "no pending objectives"
   }
 
   const runtimeContractCompatible = input.runtimeContract.runFlags.includes("--dangerously-skip-permissions") &&
@@ -528,15 +552,13 @@ export async function previewAutonomousIteration(input: {
     ? null
     : "runtime contract is missing required autonomous run flags"
 
-  const mutationPrompt = objectivePrompt
-    ? buildAutonomousPrompt(objectivePrompt, state.latestLearning)
-    : null
-
   return {
     wouldRun,
     wouldSkipReason,
     selectedObjective: objectivePrompt,
-    mutationPrompt,
+    selectedObjectiveSource: selectedObjective?.source ?? (objectivePrompt ? "manual" : null),
+    selectedObjectiveRationale: selectedObjective?.rationale ?? null,
+    mutationPrompt: resolvedObjective.mutationPrompt,
     verificationCommands,
     evaluationScenarios,
     config: {
@@ -700,7 +722,11 @@ export async function runAutonomousIteration(
   const lockAcquisition = await acquireAutonomousLoopLock(lockPath)
 
   if (!lockAcquisition.acquired) {
-    const state = await loadAutonomousLoopState(input.pluginFilePath, input.runtimeContract)
+    const state = await loadAutonomousLoopStateWithDerivedObjectives(
+      input.pluginFilePath,
+      input.runtimeContract,
+    )
+    const resolvedObjective = resolveAutonomousObjective(state, input.prompt)
 
     return await finalizeAutonomousIteration({
       pluginFilePath: input.pluginFilePath,
@@ -714,8 +740,8 @@ export async function runAutonomousIteration(
         pendingRevisionID: null,
         promotedRevisionID: null,
         rejectionReason: lockAcquisition.reason,
-        prompt: input.prompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
-        objectivePrompt: null,
+        prompt: resolvedObjective.mutationPrompt,
+        objectivePrompt: resolvedObjective.objectivePrompt,
         verification: [],
         evaluations: [],
         changedArtifacts: [],
@@ -725,9 +751,13 @@ export async function runAutonomousIteration(
 
   try {
     const executeCommand = input.executeCommand ?? executeCommandInRepo
-    const state = await loadAutonomousLoopState(input.pluginFilePath, input.runtimeContract)
+    const state = await loadAutonomousLoopStateWithDerivedObjectives(
+      input.pluginFilePath,
+      input.runtimeContract,
+    )
     const startedAt = new Date().toISOString()
-    const objectivePrompt = selectObjectivePrompt(state, input.prompt)
+    const resolvedObjective = resolveAutonomousObjective(state, input.prompt)
+    const objectivePrompt = resolvedObjective.objectivePrompt
 
     if (state.config.paused) {
       return await finalizeAutonomousIteration({
@@ -742,7 +772,7 @@ export async function runAutonomousIteration(
           pendingRevisionID: null,
           promotedRevisionID: null,
           rejectionReason: "autonomous loop skipped: loop is paused",
-          prompt: input.prompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
+          prompt: resolvedObjective.mutationPrompt,
           objectivePrompt,
           verification: [],
           evaluations: [],
@@ -751,10 +781,7 @@ export async function runAutonomousIteration(
       })
     }
 
-    const mutationPrompt = buildAutonomousPrompt(
-      objectivePrompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
-      state.latestLearning,
-    )
+    const mutationPrompt = resolvedObjective.mutationPrompt
     const configuredVerificationCommands = normalizeCommandMatrix(
       input.verificationCommands ?? state.config.verificationCommands,
       DEFAULT_VERIFICATION_COMMANDS,
@@ -906,7 +933,9 @@ export async function runAutonomousIteration(
       }
 
       const changedArtifacts = collectChangedArtifacts(registryAfterMutation, pendingRevisionID)
-      const validation = await validateRegistryArtifacts(input.pluginFilePath, input.runtimeContract)
+      const validation = await validateRegistryArtifacts(input.pluginFilePath, input.runtimeContract, {
+        recordAudit: false,
+      })
 
       if (validation.invalid.length > 0) {
         const rejectionReason = `registry validation failed: ${validation.invalid[0]?.reason ?? "unknown error"}`
@@ -1438,6 +1467,17 @@ async function loadAutonomousLoopState(
   }
 }
 
+async function loadAutonomousLoopStateWithDerivedObjectives(
+  pluginFilePath: string,
+  runtimeContract: OCEvolverRuntimeContract,
+): Promise<PersistedAutonomousLoopState> {
+  return await refreshDerivedObjectives({
+    pluginFilePath,
+    runtimeContract,
+    state: await loadAutonomousLoopState(pluginFilePath, runtimeContract),
+  })
+}
+
 async function persistAutonomousLoopState(input: {
   pluginFilePath: string
   runtimeContract: OCEvolverRuntimeContract
@@ -1601,6 +1641,234 @@ async function finalizeAutonomousIteration(input: {
     promotedRevisionID: input.iteration.promotedRevisionID,
     rejectionReason: input.iteration.rejectionReason,
   }
+}
+
+async function refreshDerivedObjectives(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  state: PersistedAutonomousLoopState
+}) {
+  const nextObjectives = await reconcileDerivedObjectives(input)
+
+  if (areObjectivesEquivalent(nextObjectives, input.state.objectives)) {
+    return input.state
+  }
+
+  const nextState: PersistedAutonomousLoopState = {
+    ...input.state,
+    latestLearning: buildLatestLearning(
+      input.state.iterations.at(-1) ?? null,
+      nextObjectives,
+      input.state.config.failurePolicy.lastEscalationReason,
+    ),
+    objectives: nextObjectives,
+  }
+
+  await persistAutonomousLoopState({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    state: nextState,
+  })
+
+  return nextState
+}
+
+async function reconcileDerivedObjectives(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  state: PersistedAutonomousLoopState
+}) {
+  const preservedObjectives = input.state.objectives.filter(
+    (objective) => !isDerivedObjectiveSource(objective.source),
+  )
+
+  if (preservedObjectives.some((objective) => objective.status === "pending")) {
+    return preservedObjectives
+  }
+
+  const proposals = await collectDerivedObjectiveProposals({
+    pluginFilePath: input.pluginFilePath,
+    runtimeContract: input.runtimeContract,
+    state: input.state,
+  })
+
+  return proposals.reduce(
+    (objectives, proposal) =>
+      enqueueDerivedObjective(objectives, createDerivedObjectiveFromProposal(proposal)),
+    preservedObjectives,
+  )
+}
+
+async function collectDerivedObjectiveProposals(input: {
+  pluginFilePath: string
+  runtimeContract: OCEvolverRuntimeContract
+  state: PersistedAutonomousLoopState
+}) {
+  const validation = await validateRegistryArtifacts(input.pluginFilePath, input.runtimeContract, {
+    recordAudit: false,
+  })
+  const sortedInvalidArtifacts = [...validation.invalid].sort((left, right) => {
+    const leftTarget = normalizeInvalidArtifactTarget(left)
+    const rightTarget = normalizeInvalidArtifactTarget(right)
+
+    if (leftTarget === rightTarget) {
+      return left.reason.localeCompare(right.reason)
+    }
+
+    return leftTarget.localeCompare(rightTarget)
+  })
+  const invalidTargets = dedupeStrings(
+    sortedInvalidArtifacts.map((artifact) => normalizeInvalidArtifactTarget(artifact)),
+  )
+  const proposals: Array<{
+    prompt: string
+    priority: number
+    source: "invalid_artifact" | "learning"
+    rationale: string
+    completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
+  }> = []
+
+  if (invalidTargets.length > 0) {
+    proposals.push({
+      prompt: buildInvalidArtifactObjectivePrompt(sortedInvalidArtifacts),
+      priority: -100,
+      source: "invalid_artifact",
+      rationale: `Detected ${invalidTargets.length} invalid mutable artifact${invalidTargets.length === 1 ? "" : "s"} during registry validation.`,
+      completionCriteria: normalizeObjectiveCompletionCriteria({
+        changedArtifacts: invalidTargets,
+      }),
+    })
+  }
+
+  const learningProposal = buildLatestLearningObjectiveProposal(input.state)
+
+  if (learningProposal) {
+    proposals.push(learningProposal)
+  }
+
+  return proposals
+}
+
+function createDerivedObjectiveFromProposal(proposal: {
+  prompt: string
+  priority: number
+  source: "invalid_artifact" | "learning"
+  rationale: string
+  completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
+}): AutonomousLoopObjective | null {
+  if (!proposal.completionCriteria) {
+    return null
+  }
+
+  return {
+    prompt: proposal.prompt,
+    priority: proposal.priority,
+    status: "pending",
+    source: proposal.source,
+    rationale: proposal.rationale,
+    completionCriteria: proposal.completionCriteria,
+    lastCompletionEvidence: null,
+    attempts: 0,
+    consecutiveFailures: 0,
+    updatedAt: new Date(0).toISOString(),
+    lastSessionID: null,
+    lastDecision: null,
+    lastEscalationReason: null,
+  }
+}
+
+function buildInvalidArtifactObjectivePrompt(invalidArtifacts: Awaited<
+  ReturnType<typeof validateRegistryArtifacts>
+>["invalid"]) {
+  return [
+    "Repair invalid mutable artifacts detected in the evolution roots.",
+    ...invalidArtifacts.map(
+      (artifact) => `- ${normalizeInvalidArtifactTarget(artifact)}: ${artifact.reason}`,
+    ),
+    "Create a revision that restores valid mutable artifacts and leaves the loop in a verified state.",
+  ].join("\n")
+}
+
+function normalizeInvalidArtifactTarget(artifact: Awaited<
+  ReturnType<typeof validateRegistryArtifacts>
+>["invalid"][number]) {
+  const skillMatch = artifact.target.match(/\.opencode\/skills\/([^/]+)\/SKILL\.md$/)
+
+  if (skillMatch) {
+    return `skill:${skillMatch[1]}`
+  }
+
+  const agentMatch = artifact.target.match(/\.opencode\/agent\/([^/]+)\.md$/)
+
+  if (agentMatch) {
+    return `agent:${agentMatch[1]}`
+  }
+
+  const commandMatch = artifact.target.match(/\.opencode\/commands\/([^/]+)\.md$/)
+
+  if (commandMatch) {
+    return `command:${commandMatch[1]}`
+  }
+
+  const memoryMatch = artifact.target.match(/\.opencode\/memory\/([^/]+)\.md$/)
+
+  if (memoryMatch) {
+    return `memory:${memoryMatch[1]}`
+  }
+
+  return artifact.target
+}
+
+function buildLatestLearningObjectiveProposal(
+  state: PersistedAutonomousLoopState,
+): {
+  prompt: string
+  priority: number
+  source: "learning"
+  rationale: string
+  completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
+} | null {
+  const latestIteration = state.iterations.at(-1) ?? null
+  const latestLearning = state.latestLearning
+
+  if (!latestIteration || !latestLearning || latestIteration.objectivePrompt) {
+    return null
+  }
+
+  if (latestIteration.decision !== "rejected" && latestIteration.decision !== "rolled_back") {
+    return null
+  }
+
+  const completionCriteria = normalizeObjectiveCompletionCriteria({
+    changedArtifacts: latestLearning.changedArtifacts,
+    verificationCommands: latestLearning.failedVerificationCommands,
+    evaluationScenarios: latestLearning.failedEvaluationScenarios,
+  })
+
+  if (!completionCriteria) {
+    return null
+  }
+
+  return {
+    prompt: buildAutonomousFailureObjectivePrompt({
+      objectivePrompt: DEFAULT_AUTONOMOUS_LOOP_PROMPT,
+      rejectionReason: latestLearning.rejectionReason,
+      completionCriteria,
+    }),
+    priority: -50,
+    source: "learning",
+    rationale:
+      "Synthesized from the latest autonomous-loop learning after a failed default-prompt iteration.",
+    completionCriteria,
+  }
+}
+
+function isDerivedObjectiveSource(source: AutonomousLoopObjectiveSource) {
+  return source === "invalid_artifact" || source === "learning"
+}
+
+function areObjectivesEquivalent(left: AutonomousLoopObjective[], right: AutonomousLoopObjective[]) {
+  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 async function runVerificationCommands(input: {
@@ -1883,6 +2151,13 @@ function normalizeAutonomousLoopState(
           prompt: objective.prompt,
           priority: typeof objective.priority === "number" ? objective.priority : 0,
           status,
+          source:
+            objective.source === "repair" ||
+            objective.source === "invalid_artifact" ||
+            objective.source === "learning"
+              ? objective.source
+              : "manual",
+          rationale: typeof objective.rationale === "string" ? objective.rationale : null,
           completionCriteria,
           lastCompletionEvidence,
           attempts: typeof objective.attempts === "number" ? objective.attempts : 0,
@@ -2071,14 +2346,14 @@ function mergeObjectives(input: {
 }): AutonomousLoopObjective[] {
   const nextInputs = new Map<string, AutonomousLoopObjectiveInput>()
 
-  if (!input.replaceObjectives) {
-    for (const objective of input.existing) {
-      nextInputs.set(objective.prompt, {
-        prompt: objective.prompt,
-        priority: objective.priority,
-        completionCriteria: objective.completionCriteria,
-      })
-    }
+    if (!input.replaceObjectives) {
+      for (const objective of input.existing) {
+        nextInputs.set(objective.prompt, {
+          prompt: objective.prompt,
+          priority: objective.priority,
+          completionCriteria: objective.completionCriteria,
+        })
+      }
   }
 
   for (const objectiveInput of input.inputs) {
@@ -2104,6 +2379,10 @@ function mergeObjectives(input: {
         existing?.status === "completed" && !input.replaceObjectives && !criteriaChanged
           ? ("completed" as const)
           : ("pending" as const),
+      source:
+        existing && !input.replaceObjectives && !criteriaChanged ? existing.source : "manual",
+      rationale:
+        existing && !input.replaceObjectives && !criteriaChanged ? existing.rationale : null,
       completionCriteria: nextCriteria,
       lastCompletionEvidence:
         existing && !criteriaChanged && !input.replaceObjectives
@@ -2154,6 +2433,21 @@ function selectObjectivePrompt(state: PersistedAutonomousLoopState, overrideProm
   pending.sort((a, b) => b.priority - a.priority)
 
   return pending[0]?.prompt ?? null
+}
+
+function resolveAutonomousObjective(
+  state: PersistedAutonomousLoopState,
+  overridePrompt?: string,
+): ResolvedAutonomousObjective {
+  const objectivePrompt = selectObjectivePrompt(state, overridePrompt)
+
+  return {
+    objectivePrompt,
+    mutationPrompt: buildAutonomousPrompt(
+      objectivePrompt ?? DEFAULT_AUTONOMOUS_LOOP_PROMPT,
+      state.latestLearning,
+    ),
+  }
 }
 
 function collectObjectiveEvaluationScenarios(
@@ -2261,6 +2555,8 @@ function deriveFollowUpObjectiveFromIteration(input: {
     }),
     priority: 0,
     status: "pending",
+    source: "repair",
+    rationale: input.iteration.rejectionReason,
     completionCriteria,
     lastCompletionEvidence: null,
     attempts: 0,

@@ -16,13 +16,21 @@ The runner currently executes these default scenarios:
 - `smoke`
 - `create-skill`
 - `create-agent`
+- `command-runtime`
 - `reuse-skill`
+- `revision-lifecycle`
 - `policy-deny`
 - `invalid-artifact`
 - `memory-guided-write`
 - `artifact-only-deny`
 - `autonomous-run`
+- `autonomous-control`
+- `autonomous-startup`
 - `rollback`
+
+Additional targeted helper scenarios exist outside the default batch:
+
+- `objective-memory-evidence`
 
 Pending revision lifecycle matters during evaluation: `evolver_write_*` tools stage a pending revision, while `evolver_promote` and `evolver_reject` decide whether that revision becomes the accepted registry state. `evolver_check` is the plugin-native health check for invalid artifacts plus pending revision state.
 
@@ -79,6 +87,27 @@ Key files:
   - `README.md` changes from `TODO` to `NOTE`
   - audit sequence includes `write_skill`, `write_agent`, `apply_skill`, `run_agent`
 
+### `command-runtime`
+
+- Exercises command-owned runtime metadata end to end
+- Expected artifact signal:
+  - `.opencode/memory/session-routing.md`
+  - `.opencode/memory/command-routing.md`
+  - `.opencode/commands/review-markdown.md` with command-owned `model`, `memory`, and `permission` metadata
+  - persisted session state under `.opencode/oc-evolver/sessions/` retains both session-applied and command-owned memory
+  - persisted runtime policy includes the command-owned memory/model/permission contract
+  - audit sequence includes `write_memory`, `write_memory`, `apply_memory`, `write_command`, `run_command`
+
+### `revision-lifecycle`
+
+- Exercises the pending revision review, rejection, and prune path across two turns
+- Expected artifact signal:
+  - turn 1 executes `evolver_write_command`, `evolver_promote`, `evolver_delete_artifact`, then `evolver_review_pending`
+  - turn 2 executes `evolver_reject` and then `evolver_prune`
+  - durable pending-review evidence exists before prune
+  - the accepted `review-markdown` command is restored after reject
+  - the obsolete revision snapshot is pruned and no pending revision remains
+
 ### `policy-deny`
 
 - Attempts a direct edit to `.opencode/plugins/oc-evolver.ts`
@@ -134,6 +163,26 @@ Key files:
 Rejected or rolled-back ad-hoc iterations now leave behind a deterministic queued follow-up objective when the loop has explicit failure evidence to reuse. The synthesized objective reuses the failed iteration's changed artifacts plus failed verification commands and evaluation scenarios as explicit completion criteria, so later runs can continue from recorded evidence without manual queue edits.
 
 The scheduler's durable lock now stores acquisition metadata and only self-recovers when that metadata proves the lock is stale. A fresh lock still produces `skipped_locked`, which keeps overlapping autonomous runs from deleting an active guard just to make progress.
+
+### `autonomous-control`
+
+- Exercises the non-mutating control plane for configure, pause, resume, and status across two turns
+- Expected artifact signal:
+  - turn 1 executes exactly `evolver_autonomous_configure` then `evolver_autonomous_pause`
+  - turn 2 executes exactly `evolver_autonomous_resume` then `evolver_autonomous_status`
+  - `.opencode/oc-evolver/autonomous-loop-paused.json` captures the paused snapshot from turn 1
+  - `.opencode/oc-evolver/autonomous-loop.json` remains enabled, unpaused, and configured with `intervalMs: 60000`, `verificationCommands: [["bun", "run", "typecheck"]]`, `evaluationScenarios: ["autonomous-run"]`, and the required `pause_loop` failure policy
+  - no loop iterations are recorded
+
+### `autonomous-startup`
+
+- Proves that persisted scheduled autonomous configuration restores at plugin startup before the model acts
+- Expected artifact signal:
+  - the single turn executes exactly `evolver_autonomous_status` and `evolver_status`
+  - `audit.ndjson` contains durable `autonomous_restore` evidence
+  - status output reflects the restored enabled scheduled state with `intervalMs: 60000`
+  - restored verification/evaluation settings remain `[ ["bun", "run", "typecheck"] ]` and `["autonomous-run"]`
+  - no loop iterations are recorded
 
 ### `objective-memory-evidence`
 

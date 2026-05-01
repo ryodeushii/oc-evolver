@@ -235,6 +235,9 @@ export async function ensureKernelRuntimePaths(
 export async function validateRegistryArtifacts(
   pluginFilePath: string,
   runtimeContract: OCEvolverRuntimeContract,
+  options: {
+    recordAudit?: boolean
+  } = {},
 ) {
   const registry = await loadRegistry(pluginFilePath, runtimeContract)
   const invalid: InvalidArtifact[] = []
@@ -298,7 +301,7 @@ export async function validateRegistryArtifacts(
 
   await saveRegistry(pluginFilePath, runtimeContract, nextRegistry)
 
-  if (invalid.length === 0) {
+  if (options.recordAudit !== false && invalid.length === 0) {
     await appendAuditEvent({
       pluginFilePath,
       runtimeContract,
@@ -311,18 +314,20 @@ export async function validateRegistryArtifacts(
     })
   }
 
-  for (const finding of invalid) {
-    await appendAuditEvent({
-      pluginFilePath,
-      runtimeContract,
-      event: {
-        action: "validate",
-        status: "failure",
-        target: finding.target,
-        detail: finding.reason,
-        failureClass: "invalid_artifact",
-      },
-    })
+  if (options.recordAudit !== false) {
+    for (const finding of invalid) {
+      await appendAuditEvent({
+        pluginFilePath,
+        runtimeContract,
+        event: {
+          action: "validate",
+          status: "failure",
+          target: finding.target,
+          detail: finding.reason,
+          failureClass: "invalid_artifact",
+        },
+      })
+    }
   }
 
   return {

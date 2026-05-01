@@ -10,6 +10,7 @@ import {
   DEFAULT_AUTONOMOUS_LOOP_INTERVAL_MS,
   DEFAULT_AUTONOMOUS_LOOP_EVALUATION_SCENARIOS,
   getAutonomousLoopStatus,
+  previewAutonomousIteration,
   resolveAutonomousLoopSchedulePolicy,
   resolveAutonomousLoopLockPath,
   runAutonomousIteration,
@@ -112,6 +113,30 @@ describe("autonomous loop", () => {
       status: "pending",
       attempts: 0,
     })
+  })
+
+  test("configure returns derived objectives in its status payload", async () => {
+    await mkdir(join(repoRoot, ".opencode", "skills", "broken-skill"), { recursive: true })
+    await writeFile(
+      join(repoRoot, ".opencode", "skills", "broken-skill", "SKILL.md"),
+      "This is not a valid skill document.\n",
+    )
+
+    const status = await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [],
+      enabled: true,
+      paused: false,
+    })
+
+    expect(status.objectives).toContainEqual(
+      expect.objectContaining({
+        source: "invalid_artifact",
+        rationale: expect.stringContaining("invalid mutable artifact"),
+      }),
+    )
   })
 
   test("rejects objective configuration that does not provide explicit completion criteria", async () => {
@@ -2537,6 +2562,14 @@ Review README.md twice.
     expect(result.decision).toBe("skipped_locked")
     expect(executedCommands).toEqual([])
     expect(result.rejectionReason).toContain("lock")
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(status.iterations.at(-1)?.prompt).toBe("Try to improve the loop.")
+    expect(status.iterations.at(-1)?.objectivePrompt).toBe("Try to improve the loop.")
   })
 
   test("reclaims a stale loop lock before starting a new iteration", async () => {
@@ -2849,6 +2882,153 @@ Review README.md twice.
     expect(originalObjective!.status).toBe("pending")
   })
 
+  test("derives an invalid-artifact repair objective when the queue is empty", async () => {
+    await mkdir(join(repoRoot, ".opencode", "skills", "broken-skill"), { recursive: true })
+    await writeFile(
+      join(repoRoot, ".opencode", "skills", "broken-skill", "SKILL.md"),
+      "This is not a valid skill document.\n",
+    )
+
+    const firstStatus = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+    const secondStatus = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    const derivedObjective = firstStatus.objectives.find(
+      (objective) =>
+        objective.prompt.startsWith("Repair invalid mutable artifacts detected in the evolution roots.") &&
+        objective.prompt.includes("skill:broken-skill"),
+    )
+
+    expect(derivedObjective).toBeTruthy()
+    expect(derivedObjective?.status).toBe("pending")
+    expect(derivedObjective?.completionCriteria).toMatchObject({
+      changedArtifacts: ["skill:broken-skill"],
+    })
+    expect(
+      secondStatus.objectives.filter((objective) => objective.prompt === derivedObjective?.prompt),
+    ).toHaveLength(1)
+  })
+
+  test("orders invalid-artifact repair objectives deterministically across multiple findings", async () => {
+    await mkdir(join(repoRoot, ".opencode", "skills", "zeta-skill"), { recursive: true })
+    await writeFile(
+      join(repoRoot, ".opencode", "skills", "zeta-skill", "SKILL.md"),
+      "This is not a valid skill document.\n",
+    )
+    await mkdir(join(repoRoot, ".opencode", "skills", "alpha-skill"), { recursive: true })
+    await writeFile(
+      join(repoRoot, ".opencode", "skills", "alpha-skill", "SKILL.md"),
+      "This is not a valid skill document either.\n",
+    )
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    const derivedObjective = status.objectives.find((objective) =>
+      objective.prompt.startsWith("Repair invalid mutable artifacts detected in the evolution roots."),
+    )
+
+    expect(derivedObjective?.completionCriteria?.changedArtifacts).toEqual([
+      "skill:alpha-skill",
+      "skill:zeta-skill",
+    ])
+    expect(derivedObjective?.prompt.indexOf("skill:alpha-skill")).toBeLessThan(
+      derivedObjective?.prompt.indexOf("skill:zeta-skill") ?? Number.POSITIVE_INFINITY,
+    )
+  })
+
+  test("surfaces derived objective source and rationale through status and preview", async () => {
+    await mkdir(join(repoRoot, ".opencode", "skills", "broken-skill"), { recursive: true })
+    await writeFile(
+      join(repoRoot, ".opencode", "skills", "broken-skill", "SKILL.md"),
+      "This is not a valid skill document.\n",
+    )
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+    const preview = await previewAutonomousIteration({
+      pluginFilePath,
+      runtimeContract,
+    })
+    const derivedObjective = status.objectives.find((objective) => objective.prompt === preview.selectedObjective)
+
+    expect(derivedObjective).toMatchObject({
+      source: "invalid_artifact",
+      rationale: expect.stringContaining("invalid mutable artifact"),
+    })
+    expect(preview.selectedObjectiveSource).toBe("invalid_artifact")
+    expect(preview.selectedObjectiveRationale).toContain("invalid mutable artifact")
+  })
+
+  test("derives a repair objective from failed default-prompt learning when no queued objective exists", async () => {
+    const result = await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: "---\ndescription: Autonomous review\n---\n\nReview autonomously.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-default-failure"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "",
+          stderr: "verification failed",
+          exitCode: 1,
+        }
+      },
+    })
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    const derivedObjective = status.objectives.find((objective) =>
+      objective.prompt.startsWith(
+        "Repair the failed autonomous attempt for objective: Review the current project state",
+      ),
+    )
+
+    expect(result.decision).toBe("rejected")
+    expect(derivedObjective).toBeTruthy()
+    expect(derivedObjective?.status).toBe("pending")
+    expect(derivedObjective?.completionCriteria).toMatchObject({
+      changedArtifacts: ["command:autonomous-review"],
+      verificationCommands: [["bun", "run", "typecheck"]],
+    })
+  })
+
   test("builds structured failure learning from a rejected iteration", async () => {
     await configureAutonomousLoop({
       pluginFilePath,
@@ -3071,6 +3251,70 @@ Review README.md twice.
     expect(prompt).toContain("Review the current project state")
     expect(prompt).toContain("consult")
     expect(prompt).not.toContain("Previous autonomous-loop learning")
+  })
+
+  test("preview agrees that the loop will run the default prompt when no objective is queued", async () => {
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      enabled: true,
+      paused: false,
+      replaceObjectives: true,
+      objectives: [],
+    })
+
+    const preview = await previewAutonomousIteration({
+      pluginFilePath,
+      runtimeContract,
+    })
+    const mutationPrompts: string[] = []
+
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          mutationPrompts.push(command.at(-1) ?? "")
+
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-preview-review",
+              document: "---\ndescription: Autonomous preview review\n---\n\nReview autonomously.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-preview-default-prompt"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "ok\n",
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+    })
+
+    expect(preview.wouldRun).toBe(true)
+    expect(preview.wouldSkipReason).toBeNull()
+    expect(preview.selectedObjective).toBeNull()
+    expect(preview.mutationPrompt).toContain("Review the current project state")
+    expect(mutationPrompts[0]).toBe(preview.mutationPrompt)
   })
 
   test("injects structured failure learning into the next autonomous prompt", async () => {
