@@ -98,7 +98,7 @@ type AutonomousLoopEvaluationRecord = {
   changedFiles: string[]
 }
 
-type AutonomousLoopObjectiveSource = "manual" | "repair" | "invalid_artifact" | "learning" | "health"
+type AutonomousLoopObjectiveSource = "manual" | "repair" | "invalid_artifact" | "learning" | "health" | "self_learning"
 
 type AutonomousLoopObjective = {
   prompt: string
@@ -154,6 +154,7 @@ type PersistedAutonomousLoopState = {
   latestLearning: PersistedAutonomousLoopLearning | null
   objectives: AutonomousLoopObjective[]
   iterations: PersistedAutonomousLoopIteration[]
+  iterationsSinceLastSelfLearning: number
 }
 
 type LegacyPersistedAutonomousLoopState = {
@@ -251,6 +252,7 @@ const MAX_AUTONOMOUS_LOOP_LOCK_AGE_MS = 60 * 60 * 1000
 const AUTONOMOUS_LOOP_LOCK_METADATA_FILE = "metadata.json"
 const MAX_ITERATION_HISTORY = 20
 const RECENT_AUTONOMOUS_FAILURE_WINDOW = 5
+const SELF_LEARNING_CADENCE = 3
 const activeAutonomousLoopWorkers = new Map<string, ActiveAutonomousLoopWorker>()
 
 export async function configureAutonomousLoop(input: {
@@ -1642,6 +1644,25 @@ async function finalizeAutonomousIteration(input: {
     objectives: nextObjectives,
     iteration: input.iteration,
   })
+
+  const skippedDecisions: AutonomousLoopDecision[] = [
+    "skipped_locked",
+    "skipped_paused",
+    "skipped_unrunnable",
+  ]
+  const isSkipped = skippedDecisions.includes(input.iteration.decision)
+  const matchedObjective = input.iteration.objectivePrompt
+    ? input.state.objectives.find((o) => o.prompt === input.iteration.objectivePrompt) ?? null
+    : null
+  const isSelfLearningPromoted =
+    matchedObjective?.source === "self_learning" && input.iteration.decision === "promoted"
+
+  const nextIterationsSinceLastSelfLearning = isSkipped
+    ? input.state.iterationsSinceLastSelfLearning
+    : isSelfLearningPromoted
+      ? 0
+      : input.state.iterationsSinceLastSelfLearning + 1
+
   const nextState: PersistedAutonomousLoopState = {
     ...input.state,
     config: escalation.config,
@@ -1653,6 +1674,7 @@ async function finalizeAutonomousIteration(input: {
     ),
     objectives: escalation.objectives,
     iterations: [...input.state.iterations, input.iteration].slice(-MAX_ITERATION_HISTORY),
+    iterationsSinceLastSelfLearning: nextIterationsSinceLastSelfLearning,
   }
 
   await persistAutonomousLoopState({
@@ -1750,7 +1772,7 @@ async function collectDerivedObjectiveProposals(input: {
   const proposals: Array<{
     prompt: string
     priority: number
-    source: "invalid_artifact" | "learning" | "health"
+    source: "invalid_artifact" | "learning" | "health" | "self_learning"
     rationale: string
     completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
   }> = []
@@ -1778,17 +1800,23 @@ async function collectDerivedObjectiveProposals(input: {
     proposals.push(learningProposal)
   }
 
+  const selfLearningProposal = buildSelfLearningObjectiveProposal(input.state)
+
+  if (selfLearningProposal) {
+    proposals.push(selfLearningProposal)
+  }
+
   return proposals
 }
 
 function createDerivedObjectiveFromProposal(proposal: {
   prompt: string
   priority: number
-  source: "invalid_artifact" | "learning" | "health"
+  source: "invalid_artifact" | "learning" | "health" | "self_learning"
   rationale: string
   completionCriteria: AutonomousLoopObjectiveCompletionCriteria | null
 }): AutonomousLoopObjective | null {
-  if (!proposal.completionCriteria) {
+  if (!proposal.completionCriteria && proposal.source !== "self_learning") {
     return null
   }
 
@@ -1960,8 +1988,29 @@ function buildHealthEvidenceObjectiveProposal(
   }
 }
 
+function buildSelfLearningObjectiveProposal(state: PersistedAutonomousLoopState): {
+  prompt: string
+  priority: number
+  source: "self_learning"
+  rationale: string
+  completionCriteria: null
+} | null {
+  if (state.iterationsSinceLastSelfLearning < SELF_LEARNING_CADENCE) {
+    return null
+  }
+
+  return {
+    prompt:
+      "Review all mutable artifacts (skills, agents, commands, memories) in the evolution roots. Identify one concrete improvement: missing documentation, redundant patterns, outdated references, or incomplete coverage. Make exactly one change and leave the workspace in a verified state.",
+    priority: -200,
+    source: "self_learning",
+    rationale: `Scheduled self-learning cadence triggered after ${state.iterationsSinceLastSelfLearning} iterations without self-directed improvement.`,
+    completionCriteria: null,
+  }
+}
+
 function isDerivedObjectiveSource(source: AutonomousLoopObjectiveSource) {
-  return source === "invalid_artifact" || source === "learning" || source === "health"
+  return source === "invalid_artifact" || source === "learning" || source === "health" || source === "self_learning"
 }
 
 function collectRepeatedStrings(entries: string[], minimumCount: number) {
@@ -2296,6 +2345,7 @@ function emptyAutonomousLoopState(): PersistedAutonomousLoopState {
     latestLearning: null,
     objectives: [],
     iterations: [],
+    iterationsSinceLastSelfLearning: 0,
   }
 }
 
@@ -2408,6 +2458,9 @@ function normalizeAutonomousLoopState(
     ),
     objectives,
     iterations,
+    iterationsSinceLastSelfLearning: typeof rawState.iterationsSinceLastSelfLearning === "number"
+      ? rawState.iterationsSinceLastSelfLearning
+      : 0,
   }
 }
 
@@ -2682,6 +2735,23 @@ function updateObjectivesAfterIteration(
       iteration.decision === "skipped_unrunnable"
     ) {
       return objective
+    }
+
+    // Self-learning objectives complete on any promoted mutation (no completion criteria).
+    if (objective.source === "self_learning") {
+      const isCompleted = iteration.decision === "promoted"
+
+      return {
+        ...objective,
+        status: isCompleted ? ("completed" as const) : ("pending" as const),
+        lastCompletionEvidence: null,
+        attempts: objective.attempts + 1,
+        consecutiveFailures: isCompleted ? 0 : objective.consecutiveFailures + 1,
+        updatedAt: iteration.completedAt,
+        lastSessionID: iteration.sessionID,
+        lastDecision: iteration.decision,
+        lastEscalationReason: isCompleted ? null : objective.lastEscalationReason,
+      }
     }
 
     const completionEvidence = evaluateObjectiveCompletion(iteration, objective.completionCriteria)

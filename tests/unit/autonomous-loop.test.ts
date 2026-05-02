@@ -3807,4 +3807,349 @@ Review README.md twice.
       intervalMs: DEFAULT_AUTONOMOUS_LOOP_INTERVAL_MS,
     })
   })
+
+  test("self-learning objective is proposed after N iterations without self-learning", async () => {
+    // Set up state with counter at cadence threshold and no pending objectives
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [],
+    })
+
+    const statePath = resolveAutonomousLoopStatePath(pluginFilePath, runtimeContract)
+    const rawState = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>
+    rawState.iterationsSinceLastSelfLearning = 3
+    await writeFile(statePath, `${JSON.stringify(rawState, null, 2)}\n`)
+
+    // getAutonomousLoopStatus triggers derived objective collection
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    const selfLearningObjective = status.objectives.find(
+      (objective) => objective.source === "self_learning",
+    )
+
+    expect(selfLearningObjective).toBeTruthy()
+    expect(selfLearningObjective?.prompt).toContain("Review all mutable artifacts")
+
+    // Verify counter is at 3 before self-learning runs
+    const rawStateBefore = JSON.parse(await readFile(statePath, "utf8")) as {
+      iterationsSinceLastSelfLearning: number
+    }
+    expect(rawStateBefore.iterationsSinceLastSelfLearning).toBe(3)
+
+    // Run the self-learning iteration (should promote and reset counter)
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: "---\ndescription: Autonomous review\n---\n\nReview autonomously.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-self-learning"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "ok\n",
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+    })
+
+    const statusAfterSelfLearning = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    // The raw state file preserves the completed self-learning objective
+    // (getAutonomousLoopStatus reconciles derived objectives and may drop completed ones)
+    const rawStateAfter = JSON.parse(await readFile(statePath, "utf8")) as {
+      iterationsSinceLastSelfLearning: number
+      objectives: Array<{ source: string; status: string }>
+    }
+
+    expect(rawStateAfter.iterationsSinceLastSelfLearning).toBe(0)
+
+    const selfLearningObjectiveAfter = rawStateAfter.objectives.find(
+      (objective) => objective.source === "self_learning",
+    )
+
+    expect(selfLearningObjectiveAfter?.status).toBe("completed")
+  })
+
+  test("self-learning objective is NOT proposed before cadence is reached", async () => {
+    // Configure with counter below cadence threshold
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [],
+    })
+
+    const statePath = resolveAutonomousLoopStatePath(pluginFilePath, runtimeContract)
+    const rawState = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>
+    rawState.iterationsSinceLastSelfLearning = 2
+    await writeFile(statePath, `${JSON.stringify(rawState, null, 2)}\n`)
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    const selfLearningObjective = status.objectives.find(
+      (objective) => objective.source === "self_learning",
+    )
+
+    expect(selfLearningObjective).toBeFalsy()
+  })
+
+  test("self-learning objective has lowest priority", async () => {
+    // Set up state with counter at cadence and a pending manual objective
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [
+        {
+          prompt: "Ship the autonomous review command.",
+          completionCriteria: {
+            changedArtifacts: ["command:autonomous-review"],
+          },
+        },
+      ],
+    })
+
+    const statePath = resolveAutonomousLoopStatePath(pluginFilePath, runtimeContract)
+    const rawState = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>
+    rawState.iterationsSinceLastSelfLearning = 3
+    await writeFile(statePath, `${JSON.stringify(rawState, null, 2)}\n`)
+
+    const status = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    // Manual objective should be present (self-learning is NOT proposed because manual is pending)
+    const manualObjective = status.objectives.find(
+      (objective) => objective.source === "manual",
+    )
+    const selfLearningObjective = status.objectives.find(
+      (objective) => objective.source === "self_learning",
+    )
+
+    expect(manualObjective).toBeTruthy()
+    // Self-learning is NOT proposed while manual objective is pending
+    expect(selfLearningObjective).toBeFalsy()
+
+    // Preview should select the manual objective
+    const preview = await previewAutonomousIteration({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    expect(preview.selectedObjective).toBe(manualObjective!.prompt)
+    expect(preview.selectedObjectiveSource).toBe("manual")
+  })
+
+  test("self-learning completes on any promoted mutation", async () => {
+    // Set up state with counter at cadence and no pending objectives
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [],
+    })
+
+    const statePath = resolveAutonomousLoopStatePath(pluginFilePath, runtimeContract)
+    const rawState = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>
+    rawState.iterationsSinceLastSelfLearning = 3
+    await writeFile(statePath, `${JSON.stringify(rawState, null, 2)}\n`)
+
+    // Verify self-learning objective exists and is pending
+    const statusBefore = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    const selfLearningObjectiveBefore = statusBefore.objectives.find(
+      (objective) => objective.source === "self_learning",
+    )
+
+    expect(selfLearningObjectiveBefore).toBeTruthy()
+    expect(selfLearningObjectiveBefore?.status).toBe("pending")
+
+    // Run the self-learning iteration (should promote and complete)
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: "---\ndescription: Autonomous review\n---\n\nReview autonomously.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-self-learning-complete"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        return {
+          stdout: "ok\n",
+          stderr: "",
+          exitCode: 0,
+        }
+      },
+    })
+
+    const statusAfter = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    // Check raw state for the completed self-learning objective
+    const rawStateAfter = JSON.parse(await readFile(statePath, "utf8")) as {
+      objectives: Array<{ source: string; status: string; lastDecision: string | null }>
+    }
+
+    const selfLearningObjectiveAfter = rawStateAfter.objectives.find(
+      (objective) => objective.source === "self_learning",
+    )
+
+    expect(selfLearningObjectiveAfter?.status).toBe("completed")
+    expect(selfLearningObjectiveAfter?.lastDecision).toBe("promoted")
+  })
+
+  test("failed self-learning does not reset counter", async () => {
+    // Set up state with counter at cadence and no pending objectives
+    await configureAutonomousLoop({
+      pluginFilePath,
+      runtimeContract,
+      replaceObjectives: true,
+      objectives: [],
+    })
+
+    const statePath = resolveAutonomousLoopStatePath(pluginFilePath, runtimeContract)
+    const rawState = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>
+    rawState.iterationsSinceLastSelfLearning = 3
+    await writeFile(statePath, `${JSON.stringify(rawState, null, 2)}\n`)
+
+    // Verify self-learning objective exists
+    const statusBefore = await getAutonomousLoopStatus({
+      pluginFilePath,
+      runtimeContract,
+    })
+
+    const selfLearningObjectiveBefore = statusBefore.objectives.find(
+      (objective) => objective.source === "self_learning",
+    )
+
+    expect(selfLearningObjectiveBefore).toBeTruthy()
+
+    // Read counter before failing self-learning iteration
+    const rawStateBefore = JSON.parse(await readFile(statePath, "utf8")) as {
+      iterationsSinceLastSelfLearning: number
+    }
+
+    const counterBefore = rawStateBefore.iterationsSinceLastSelfLearning
+
+    // Run the self-learning iteration that will fail verification
+    await runAutonomousIteration({
+      repoRoot,
+      pluginFilePath,
+      runtimeContract,
+      verificationCommands: [["bun", "run", "typecheck"]],
+      evaluationScenarios: [],
+      executeCommand: async ({ command }) => {
+        const probeResult = runtimeContractProbeResult(command)
+
+        if (probeResult) {
+          return probeResult
+        }
+
+        if (command[0] === "opencode") {
+          await applyMutationTransaction({
+            pluginFilePath,
+            runtimeContract,
+            mutation: {
+              kind: "command",
+              name: "autonomous-review",
+              document: "---\ndescription: Autonomous review failed\n---\n\nReview.\n",
+            },
+          })
+
+          return {
+            stdout: '{"type":"step_start","sessionID":"session-self-learning-fail"}\n',
+            stderr: "",
+            exitCode: 0,
+          }
+        }
+
+        // Verification fails — iteration gets rejected
+        return {
+          stdout: "verification failed\n",
+          stderr: "typecheck error",
+          exitCode: 1,
+        }
+      },
+    })
+
+    // Read counter and objectives after failing self-learning iteration
+    const rawStateAfterFail = JSON.parse(await readFile(statePath, "utf8")) as {
+      iterationsSinceLastSelfLearning: number
+      objectives: Array<{ source: string; status: string; lastDecision: string | null }>
+    }
+
+    // Counter should NOT have been reset — it should have incremented
+    expect(rawStateAfterFail.iterationsSinceLastSelfLearning).toBe(counterBefore + 1)
+
+    // Self-learning objective should still be pending (not completed)
+    const selfLearningObjectiveAfter = rawStateAfterFail.objectives.find(
+      (objective) => objective.source === "self_learning",
+    )
+
+    expect(selfLearningObjectiveAfter?.status).toBe("pending")
+    expect(selfLearningObjectiveAfter?.lastDecision).toBe("rejected")
+  })
 })
