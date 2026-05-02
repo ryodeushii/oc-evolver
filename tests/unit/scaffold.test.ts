@@ -23,7 +23,7 @@ describe("task 1 scaffold", () => {
   })
 
   test("freezes the local runtime contract", () => {
-    expect(runtimeContract.opencodeVersion).toBe("1.14.29")
+    expect(runtimeContract.opencodeVersion).toBe("1.14.31")
     expect(runtimeContract.runFlags).toEqual([
       "--command",
       "--continue",

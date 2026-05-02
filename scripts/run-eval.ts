@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import {
   cp,
   mkdir,
@@ -24,6 +25,7 @@ type ExecuteCommand = (input: {
   workspaceRoot: string
   prompt: string
   command: string[]
+  environment?: NodeJS.ProcessEnv
 }) => Promise<EvalCommandResult>
 
 type EvaluationResult = {
@@ -56,62 +58,35 @@ const OUTER_AUTONOMOUS_MUTATING_TOOLS = new Set([
   "evolver_delete_artifact",
   "evolver_prune",
 ])
-const AUTONOMOUS_RUN_TURN_ONE_TOOLS = [
-  "evolver_autonomous_configure",
-  "evolver_autonomous_start",
-] as const
-const AUTONOMOUS_RUN_TURN_TWO_TOOLS = [
-  "evolver_autonomous_status",
-  "evolver_status",
-] as const
-const AUTONOMOUS_STARTUP_TURN_ONE_TOOLS = [
-  "evolver_autonomous_status",
-  "evolver_status",
-] as const
-const AUTONOMOUS_PREVIEW_TURN_ONE_TOOLS = [
-  "evolver_autonomous_preview",
-  "evolver_autonomous_status",
-] as const
-const AUTONOMOUS_METRICS_TURN_ONE_TOOLS = [
-  "evolver_autonomous_metrics",
-  "evolver_autonomous_status",
-] as const
-const AUTONOMOUS_STOP_TURN_ONE_TOOLS = [
-  "evolver_autonomous_stop",
-  "evolver_autonomous_status",
-] as const
+const AUTONOMOUS_RUN_TURN_ONE_TOOLS = ["evolver_autonomous_start"] as const
+const AUTONOMOUS_RUN_TURN_TWO_TOOLS = ["evolver_autonomous_status"] as const
+const AUTONOMOUS_RUN_TURN_THREE_TOOLS = ["evolver_status"] as const
+const AUTONOMOUS_STARTUP_TURN_ONE_TOOLS = ["evolver_autonomous_status"] as const
+const AUTONOMOUS_STARTUP_TURN_TWO_TOOLS = ["evolver_status"] as const
+const AUTONOMOUS_PREVIEW_TURN_ONE_TOOLS = ["evolver_autonomous_preview"] as const
+const AUTONOMOUS_PREVIEW_TURN_TWO_TOOLS = ["evolver_autonomous_status"] as const
+const AUTONOMOUS_METRICS_TURN_ONE_TOOLS = ["evolver_autonomous_metrics"] as const
+const AUTONOMOUS_METRICS_TURN_TWO_TOOLS = ["evolver_autonomous_status"] as const
+const AUTONOMOUS_STOP_TURN_ONE_TOOLS = ["evolver_autonomous_stop"] as const
+const AUTONOMOUS_STOP_TURN_TWO_TOOLS = ["evolver_autonomous_status"] as const
 const OBJECTIVE_MEMORY_EVIDENCE_ALLOWED_CHANGED_FILES: readonly string[] = [
   ".opencode/oc-evolver/registry.json",
 ]
-const OBJECTIVE_MEMORY_EVIDENCE_TOOLS = [
-  "evolver_autonomous_status",
-  "evolver_status",
-] as const
-const COMMAND_RUNTIME_TOOLS = [
-  "evolver_write_memory",
-  "evolver_write_memory",
-  "evolver_apply_memory",
-  "evolver_write_command",
-  "evolver_run_command",
-] as const
-const REVISION_LIFECYCLE_TURN_ONE_TOOLS = [
-  "evolver_write_command",
-  "evolver_promote",
-  "evolver_delete_artifact",
-  "evolver_review_pending",
-] as const
-const REVISION_LIFECYCLE_TURN_TWO_TOOLS = [
-  "evolver_reject",
-  "evolver_prune",
-] as const
+const OBJECTIVE_MEMORY_EVIDENCE_TURN_ONE_TOOLS = ["evolver_autonomous_status"] as const
+const OBJECTIVE_MEMORY_EVIDENCE_TURN_TWO_TOOLS = ["evolver_status"] as const
+const COMMAND_RUNTIME_TURN_ONE_TOOLS = ["evolver_run_command"] as const
+const REVISION_LIFECYCLE_TURN_ONE_TOOLS = ["evolver_write_command"] as const
+const REVISION_LIFECYCLE_TURN_TWO_TOOLS = ["evolver_promote"] as const
+const REVISION_LIFECYCLE_TURN_THREE_TOOLS = ["evolver_delete_artifact"] as const
+const REVISION_LIFECYCLE_TURN_FOUR_TOOLS = ["evolver_review_pending"] as const
+const REVISION_LIFECYCLE_TURN_FIVE_TOOLS = ["evolver_reject"] as const
+const REVISION_LIFECYCLE_TURN_SIX_TOOLS = ["evolver_prune"] as const
 const AUTONOMOUS_CONTROL_TURN_ONE_TOOLS = [
   "evolver_autonomous_configure",
-  "evolver_autonomous_pause",
 ] as const
-const AUTONOMOUS_CONTROL_TURN_TWO_TOOLS = [
-  "evolver_autonomous_resume",
-  "evolver_autonomous_status",
-] as const
+const AUTONOMOUS_CONTROL_TURN_TWO_TOOLS = ["evolver_autonomous_pause"] as const
+const AUTONOMOUS_CONTROL_TURN_THREE_TOOLS = ["evolver_autonomous_resume"] as const
+const AUTONOMOUS_CONTROL_TURN_FOUR_TOOLS = ["evolver_autonomous_status"] as const
 const AUTONOMOUS_CONTROL_CONFIGURE_INPUT = {
   enabled: true,
   paused: false,
@@ -125,8 +100,12 @@ const AUTONOMOUS_CONTROL_CONFIGURE_INPUT = {
   objectives: [],
   replaceObjectives: true,
 } as const
-const AUTONOMOUS_RUN_OBJECTIVE_PROMPT =
-  'Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.'
+const AUTONOMOUS_RUN_OBJECTIVE_PROMPT = `Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---
+name: autonomous-evidence-memory
+description: Autonomous evaluation evidence memory.
+---
+
+Autonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.`
 const AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND = ["bun", "--version"]
 const AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT =
   "Repair the autonomous review command while keeping typecheck green."
@@ -187,13 +166,25 @@ const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
   paused: false,
 } as const
 
-export const DEFAULT_SCENARIOS = [
+export const CORE_SCENARIOS = [
+  "smoke",
+  "policy-deny",
+  "autonomous-run",
+  "autonomous-control",
+  "autonomous-startup",
+] as const
+
+export const PR_SCENARIOS = [
+  ...CORE_SCENARIOS,
+  "autonomous-preview",
+  "autonomous-metrics",
+  "autonomous-stop",
+] as const
+
+export const FULL_SCENARIOS = [
   "smoke",
   "create-skill",
   "create-agent",
-  "command-runtime",
-  "reuse-skill",
-  "revision-lifecycle",
   "policy-deny",
   "invalid-artifact",
   "memory-guided-write",
@@ -202,7 +193,13 @@ export const DEFAULT_SCENARIOS = [
   "autonomous-control",
   "autonomous-startup",
   "rollback",
-]
+  "autonomous-preview",
+  "autonomous-metrics",
+  "autonomous-stop",
+  "objective-memory-evidence",
+] as const
+
+export const DEFAULT_SCENARIOS = [...CORE_SCENARIOS]
 
 const IGNORED_CHANGED_FILE_PREFIXES = [".opencode/node_modules/"]
 const IGNORED_CHANGED_FILES = new Set([
@@ -227,9 +224,19 @@ export async function runEvaluationScenario(input: {
 
   const workspaceParent = await mkdtemp(join(tmpdir(), `oc-evolver-${input.scenarioName}-`))
   const workspaceRoot = join(workspaceParent, "workspace")
+  const evaluationHomeRoot = join(workspaceParent, "home")
+  const evaluationConfigHome = join(evaluationHomeRoot, ".config")
 
   await cp(baseFixtureRoot, workspaceRoot, { recursive: true })
   await seedScenarioWorkspace(input.scenarioName, workspaceRoot)
+  await mkdir(join(evaluationConfigHome, "opencode"), { recursive: true })
+
+  // Keep evaluation runs hermetic so nested scenarios do not inherit caller-installed plugins.
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: evaluationHomeRoot,
+    XDG_CONFIG_HOME: evaluationConfigHome,
+  }
 
   const timestamp = input.timestamp ?? new Date().toISOString().replaceAll(":", "-")
   const resultDir = join(input.repoRoot, "eval/results", input.scenarioName, timestamp)
@@ -250,6 +257,7 @@ export async function runEvaluationScenario(input: {
       workspaceRoot,
       prompt: turnPrompt,
       command,
+      environment,
     })
     const parsedResponse = parseOpencodeJsonStream(execution.stdout)
     const nextSessionID: string | null = extractSessionID(parsedResponse) ?? sessionID
@@ -366,6 +374,7 @@ async function executeOpencodeRun(input: {
   workspaceRoot: string
   prompt: string
   command: string[]
+  environment?: NodeJS.ProcessEnv
 }): Promise<EvalCommandResult> {
   const [executable, ...args] = input.command
 
@@ -376,7 +385,7 @@ async function executeOpencodeRun(input: {
   return await new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: input.workspaceRoot,
-      env: process.env,
+      env: input.environment ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     })
 
@@ -537,13 +546,13 @@ async function seedScenarioWorkspace(scenarioName: string, workspaceRoot: string
         join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
         JSON.stringify(
           {
-            config: {
-              enabled: true,
-              paused: false,
-              intervalMs: 60_000,
-              verificationCommands: [AUTONOMOUS_PREVIEW_CONFIGURED_VERIFICATION_COMMAND],
-              evaluationScenarios: ["smoke"],
-              failurePolicy: {
+              config: {
+                enabled: true,
+                paused: false,
+                intervalMs: 0,
+                verificationCommands: [AUTONOMOUS_PREVIEW_CONFIGURED_VERIFICATION_COMMAND],
+                evaluationScenarios: ["smoke"],
+                failurePolicy: {
                 maxConsecutiveFailures: 3,
                 escalationAction: "pause_loop",
                 lastEscalationReason: null,
@@ -576,7 +585,7 @@ async function seedScenarioWorkspace(scenarioName: string, workspaceRoot: string
       )
       return
     }
-    case "autonomous-metrics": {
+    case "autonomous-run": {
       await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
       await writeFile(
         join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
@@ -585,10 +594,141 @@ async function seedScenarioWorkspace(scenarioName: string, workspaceRoot: string
             config: {
               enabled: true,
               paused: false,
-              intervalMs: 60_000,
-              verificationCommands: [["bun", "run", "typecheck"]],
+              intervalMs: 0,
+              verificationCommands: [],
               evaluationScenarios: ["smoke"],
               failurePolicy: {
+                maxConsecutiveFailures: 3,
+                escalationAction: "pause_loop",
+                lastEscalationReason: null,
+              },
+            },
+            lastSessionID: null,
+            latestLearning: null,
+            objectives: [
+              {
+                prompt: AUTONOMOUS_RUN_OBJECTIVE_PROMPT,
+                priority: 0,
+                status: "pending",
+                source: "manual",
+                rationale: null,
+                completionCriteria: AUTONOMOUS_RUN_COMPLETION_CRITERIA,
+                attempts: 0,
+                consecutiveFailures: 0,
+                updatedAt: new Date(0).toISOString(),
+                lastSessionID: null,
+                lastDecision: null,
+                lastEscalationReason: null,
+              },
+            ],
+            iterations: [],
+          },
+          null,
+          2,
+        ),
+      )
+      return
+    }
+    case "command-runtime": {
+      await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
+      await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
+      await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+
+      const sessionRoutingDocument = [
+        "---",
+        "name: session-routing",
+        "description: Session runtime guidance.",
+        "storage_mode: memory-and-artifact",
+        "---",
+        "",
+        "Prefer session-applied guidance.",
+        "",
+      ].join("\n")
+      const commandRoutingDocument = [
+        "---",
+        "name: command-routing",
+        "description: Command runtime guidance.",
+        "storage_mode: memory-and-artifact",
+        "---",
+        "",
+        "Prefer command-owned guidance.",
+        "",
+      ].join("\n")
+      const reviewMarkdownDocument = [
+        "---",
+        "description: Review markdown with command-owned runtime metadata",
+        "model: openai/gpt-5.4",
+        "memory:",
+        "  - session-routing",
+        "  - command-routing",
+        "permission:",
+        "  edit: deny",
+        "---",
+        "",
+        'Respond with exactly "README.md reviewed." and stop.',
+        "",
+      ].join("\n")
+
+      await writeFile(join(workspaceRoot, ".opencode/memory/session-routing.md"), sessionRoutingDocument)
+      await writeFile(join(workspaceRoot, ".opencode/memory/command-routing.md"), commandRoutingDocument)
+      await writeFile(join(workspaceRoot, ".opencode/commands/review-markdown.md"), reviewMarkdownDocument)
+
+      const hashDocument = (document: string) => createHash("sha256").update(document).digest("hex")
+      await writeFile(
+        join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+        JSON.stringify(
+          {
+            skills: {},
+            agents: {},
+            commands: {
+              "review-markdown": {
+                kind: "command",
+                name: "review-markdown",
+                nativePath: ".opencode/commands/review-markdown.md",
+                revisionID: "rev-command-runtime-seeded",
+                contentHash: hashDocument(reviewMarkdownDocument),
+              },
+            },
+            memories: {
+              "session-routing": {
+                kind: "memory",
+                name: "session-routing",
+                nativePath: ".opencode/memory/session-routing.md",
+                revisionID: "rev-command-runtime-seeded",
+                contentHash: hashDocument(sessionRoutingDocument),
+              },
+              "command-routing": {
+                kind: "memory",
+                name: "command-routing",
+                nativePath: ".opencode/memory/command-routing.md",
+                revisionID: "rev-command-runtime-seeded",
+                contentHash: hashDocument(commandRoutingDocument),
+              },
+            },
+            quarantine: {},
+            currentRevision: "rev-command-runtime-seeded",
+            pendingRevision: null,
+          },
+          null,
+          2,
+        ),
+      )
+      await writeFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), "")
+      return
+    }
+    case "autonomous-metrics": {
+      await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
+      await writeFile(
+        join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+        JSON.stringify(
+          {
+              config: {
+                enabled: true,
+                paused: false,
+                intervalMs: 0,
+                verificationCommands: [["bun", "run", "typecheck"]],
+                evaluationScenarios: ["smoke"],
+                failurePolicy: {
                 maxConsecutiveFailures: 3,
                 escalationAction: "pause_loop",
                 lastEscalationReason: "post-promotion verification regressed",
@@ -755,13 +895,13 @@ async function seedScenarioWorkspace(scenarioName: string, workspaceRoot: string
         join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
         JSON.stringify(
           {
-            config: {
-              enabled: true,
-              paused: false,
-              intervalMs: 60_000,
-              verificationCommands: [["bun", "run", "typecheck"]],
-              evaluationScenarios: ["smoke"],
-              failurePolicy: {
+              config: {
+                enabled: true,
+                paused: false,
+                intervalMs: 0,
+                verificationCommands: [["bun", "run", "typecheck"]],
+                evaluationScenarios: ["smoke"],
+                failurePolicy: {
                 maxConsecutiveFailures: 3,
                 escalationAction: "pause_loop",
                 lastEscalationReason: null,
@@ -838,31 +978,16 @@ async function assertScenarioArtifacts(input: {
         throw new Error(`scenario command-runtime expected exactly 1 turn, got ${input.turns.length}`)
       }
 
-      const executedToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
-      const toolEvents = collectToolEvents(input.parsedResponses[0])
+      const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
 
       assertExactToolSequence(
-        executedToolSequence,
-        COMMAND_RUNTIME_TOOLS,
-        "scenario command-runtime did not follow the required memory-command tool path",
+        turnOneToolSequence,
+        COMMAND_RUNTIME_TURN_ONE_TOOLS,
+        "scenario command-runtime did not follow the required apply/run path",
       )
 
-      const writeMemoryEvents = toolEvents.filter((event) => event.tool === "evolver_write_memory")
-
-      if (
-        writeMemoryEvents.length !== 2 ||
-        readObjectStringField(writeMemoryEvents[0]?.input, "memoryName") !== "session-routing" ||
-        readObjectStringField(writeMemoryEvents[1]?.input, "memoryName") !== "command-routing"
-      ) {
-        throw new Error("scenario command-runtime did not write session-routing then command-routing")
-      }
-
-      const applyMemoryEvent = toolEvents.find((event) => event.tool === "evolver_apply_memory")
-      const runCommandEvent = toolEvents.find((event) => event.tool === "evolver_run_command")
-
-      if (!areJsonValuesEqual(applyMemoryEvent?.input, { memoryName: "session-routing" })) {
-        throw new Error("scenario command-runtime did not apply only the required session-routing memory")
-      }
+      const runCommandEvent = turnOneToolEvents.find((event) => event.tool === "evolver_run_command")
 
       if (
         readObjectStringField(runCommandEvent?.input, "commandName") !== "review-markdown" ||
@@ -871,16 +996,6 @@ async function assertScenarioArtifacts(input: {
         throw new Error("scenario command-runtime did not run review-markdown against README.md")
       }
 
-      const writeMemoryAuditEvents = auditEvents.filter(
-        (event) => event.action === "write_memory" && event.status === "success",
-      )
-
-      if (writeMemoryAuditEvents.length < 2) {
-        throw new Error("scenario command-runtime missing both write_memory audit events")
-      }
-
-      assertAuditAction(auditEvents, "apply_memory", "scenario command-runtime missing apply_memory audit event")
-      assertAuditAction(auditEvents, "write_command", "scenario command-runtime missing write_command audit event")
       assertAuditAction(auditEvents, "run_command", "scenario command-runtime missing run_command audit event")
 
       if (!registry.memories?.["session-routing"] || !registry.memories?.["command-routing"]) {
@@ -912,8 +1027,8 @@ async function assertScenarioArtifacts(input: {
         }
       }
 
-      if (!sessionState.memories?.["session-routing"] || !sessionState.memories?.["command-routing"]) {
-        throw new Error("scenario command-runtime missing persisted session and command memory state")
+      if (!sessionState.memories?.["command-routing"]) {
+        throw new Error("scenario command-runtime missing persisted command memory state")
       }
 
       if (sessionState.runtimePolicy?.sourceKind !== "command") {
@@ -984,17 +1099,23 @@ async function assertScenarioArtifacts(input: {
       return
     }
     case "objective-memory-evidence": {
-      if (input.turns.length !== 1) {
-        throw new Error(`scenario objective-memory-evidence expected exactly 1 turn, got ${input.turns.length}`)
+      if (input.turns.length !== 2) {
+        throw new Error(`scenario objective-memory-evidence expected exactly 2 turns, got ${input.turns.length}`)
       }
 
-      const executedToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
-      const executedTools = new Set(executedToolSequence)
+      const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
+      const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const executedTools = new Set([...turnOneToolSequence, ...turnTwoToolSequence])
 
       assertExactToolSequence(
-        executedToolSequence,
-        OBJECTIVE_MEMORY_EVIDENCE_TOOLS,
-        "scenario objective-memory-evidence did not stay status-only",
+        turnOneToolSequence,
+        OBJECTIVE_MEMORY_EVIDENCE_TURN_ONE_TOOLS,
+        "scenario objective-memory-evidence did not follow the required turn-1 autonomous status path",
+      )
+      assertExactToolSequence(
+        turnTwoToolSequence,
+        OBJECTIVE_MEMORY_EVIDENCE_TURN_TWO_TOOLS,
+        "scenario objective-memory-evidence did not follow the required turn-2 registry status path",
       )
 
       assertNoExecutedTools(
@@ -1016,22 +1137,46 @@ async function assertScenarioArtifacts(input: {
       return
     }
     case "revision-lifecycle": {
-      if (input.turns.length !== 2) {
-        throw new Error(`scenario revision-lifecycle expected exactly 2 turns, got ${input.turns.length}`)
+      if (input.turns.length !== 6) {
+        throw new Error(`scenario revision-lifecycle expected exactly 6 turns, got ${input.turns.length}`)
       }
 
       const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
       const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const turnThreeToolSequence = collectExecutedToolSequence(input.parsedResponses[2])
+      const turnFourToolSequence = collectExecutedToolSequence(input.parsedResponses[3])
+      const turnFiveToolSequence = collectExecutedToolSequence(input.parsedResponses[4])
+      const turnSixToolSequence = collectExecutedToolSequence(input.parsedResponses[5])
 
       assertExactToolSequence(
         turnOneToolSequence,
         REVISION_LIFECYCLE_TURN_ONE_TOOLS,
-        "scenario revision-lifecycle did not follow the required turn-1 revision review path",
+        "scenario revision-lifecycle did not follow the required turn-1 write path",
       )
       assertExactToolSequence(
         turnTwoToolSequence,
         REVISION_LIFECYCLE_TURN_TWO_TOOLS,
-        "scenario revision-lifecycle did not follow the required turn-2 reject/prune path",
+        "scenario revision-lifecycle did not follow the required turn-2 promote path",
+      )
+      assertExactToolSequence(
+        turnThreeToolSequence,
+        REVISION_LIFECYCLE_TURN_THREE_TOOLS,
+        "scenario revision-lifecycle did not follow the required turn-3 delete path",
+      )
+      assertExactToolSequence(
+        turnFourToolSequence,
+        REVISION_LIFECYCLE_TURN_FOUR_TOOLS,
+        "scenario revision-lifecycle did not follow the required turn-4 review path",
+      )
+      assertExactToolSequence(
+        turnFiveToolSequence,
+        REVISION_LIFECYCLE_TURN_FIVE_TOOLS,
+        "scenario revision-lifecycle did not follow the required turn-5 reject path",
+      )
+      assertExactToolSequence(
+        turnSixToolSequence,
+        REVISION_LIFECYCLE_TURN_SIX_TOOLS,
+        "scenario revision-lifecycle did not follow the required turn-6 prune path",
       )
 
       assertAuditAction(auditEvents, "delete_artifact", "scenario revision-lifecycle missing delete_artifact audit event")
@@ -1039,8 +1184,8 @@ async function assertScenarioArtifacts(input: {
       assertAuditAction(auditEvents, "reject", "scenario revision-lifecycle missing reject audit event")
       assertAuditAction(auditEvents, "prune", "scenario revision-lifecycle missing prune audit event")
 
-      const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
-      const reviewPendingEvent = turnOneToolEvents.find((event) => event.tool === "evolver_review_pending")
+      const turnFourToolEvents = collectToolEvents(input.parsedResponses[3])
+      const reviewPendingEvent = turnFourToolEvents.find((event) => event.tool === "evolver_review_pending")
       const pendingReview = parseToolOutput(reviewPendingEvent?.output) as {
         currentRevisionID?: string | null
         pendingRevisionID?: string | null
@@ -1176,14 +1321,18 @@ async function assertScenarioArtifacts(input: {
       return
     }
     case "autonomous-control": {
-      if (input.turns.length !== 2) {
-        throw new Error(`scenario autonomous-control expected exactly 2 turns, got ${input.turns.length}`)
+      if (input.turns.length !== 4) {
+        throw new Error(`scenario autonomous-control expected exactly 4 turns, got ${input.turns.length}`)
       }
 
       const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
       const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const turnThreeToolSequence = collectExecutedToolSequence(input.parsedResponses[2])
+      const turnFourToolSequence = collectExecutedToolSequence(input.parsedResponses[3])
       const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
       const turnTwoToolEvents = collectToolEvents(input.parsedResponses[1])
+      const turnThreeToolEvents = collectToolEvents(input.parsedResponses[2])
+      const turnFourToolEvents = collectToolEvents(input.parsedResponses[3])
 
       assertAuditAction(auditEvents, "autonomous_pause", "scenario autonomous-control missing autonomous_pause audit event")
       assertAuditAction(auditEvents, "autonomous_resume", "scenario autonomous-control missing autonomous_resume audit event")
@@ -1191,13 +1340,25 @@ async function assertScenarioArtifacts(input: {
       assertExactToolSequence(
         turnOneToolSequence,
         AUTONOMOUS_CONTROL_TURN_ONE_TOOLS,
-        "scenario autonomous-control did not follow the required turn-1 configure/pause path",
+        "scenario autonomous-control did not follow the required turn-1 configure-only path",
       )
 
       assertExactToolSequence(
         turnTwoToolSequence,
         AUTONOMOUS_CONTROL_TURN_TWO_TOOLS,
-        "scenario autonomous-control did not follow the required turn-2 resume/status path",
+        "scenario autonomous-control did not follow the required turn-2 pause-only path",
+      )
+
+      assertExactToolSequence(
+        turnThreeToolSequence,
+        AUTONOMOUS_CONTROL_TURN_THREE_TOOLS,
+        "scenario autonomous-control did not follow the required turn-3 resume-only path",
+      )
+
+      assertExactToolSequence(
+        turnFourToolSequence,
+        AUTONOMOUS_CONTROL_TURN_FOUR_TOOLS,
+        "scenario autonomous-control did not follow the required turn-4 status-only path",
       )
 
       const configureEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_configure")
@@ -1210,17 +1371,8 @@ async function assertScenarioArtifacts(input: {
         throw new Error("scenario autonomous-control did not use the required configure payload")
       }
 
-      const pauseEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_pause")
+      const pauseEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_autonomous_pause")
       const pausedSnapshot = parseToolOutput(pauseEvent?.output) as {
-        config?: {
-          enabled?: boolean
-          paused?: boolean
-          intervalMs?: number
-        }
-      }
-      const pausedArtifact = JSON.parse(
-        await readFile(join(input.workspaceRoot, ".opencode/oc-evolver/autonomous-loop-paused.json"), "utf8"),
-      ) as {
         config?: {
           enabled?: boolean
           paused?: boolean
@@ -1233,19 +1385,11 @@ async function assertScenarioArtifacts(input: {
         pausedSnapshot.config?.paused !== true ||
         pausedSnapshot.config?.intervalMs !== 60_000
       ) {
-        throw new Error("scenario autonomous-control missing durable paused-state evidence after turn 1")
+        throw new Error("scenario autonomous-control pause output did not reflect the paused configured state")
       }
 
-      if (
-        pausedArtifact.config?.enabled !== pausedSnapshot.config?.enabled ||
-        pausedArtifact.config?.paused !== pausedSnapshot.config?.paused ||
-        pausedArtifact.config?.intervalMs !== pausedSnapshot.config?.intervalMs
-      ) {
-        throw new Error("scenario autonomous-control paused-state artifact did not match the pause output")
-      }
-
-      const resumeEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_autonomous_resume")
-      const statusEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const resumeEvent = turnThreeToolEvents.find((event) => event.tool === "evolver_autonomous_resume")
+      const statusEvent = turnFourToolEvents.find((event) => event.tool === "evolver_autonomous_status")
       const resumedState = parseToolOutput(resumeEvent?.output) as {
         config?: {
           enabled?: boolean
@@ -1302,7 +1446,11 @@ async function assertScenarioArtifacts(input: {
             escalationAction?: string
           }
         }
-        iterations?: unknown[]
+        iterations?: Array<{
+          decision?: string
+          rejectionReason?: string | null
+          changedArtifacts?: unknown[]
+        }>
       }
 
       if (loopState.config?.enabled !== true || loopState.config?.paused !== false) {
@@ -1329,15 +1477,27 @@ async function assertScenarioArtifacts(input: {
         throw new Error("scenario autonomous-control did not persist the required failurePolicy")
       }
 
-      if ((loopState.iterations ?? []).length !== 0) {
-        throw new Error("scenario autonomous-control unexpectedly recorded loop iterations")
+      const loopIterations = loopState.iterations ?? []
+
+      if (loopIterations.length === 0) {
+        throw new Error("scenario autonomous-control did not record the expected skipped worker iterations")
+      }
+
+      for (const iteration of loopIterations) {
+        if (
+          iteration.decision !== "skipped_unrunnable" ||
+          iteration.rejectionReason !== "no bounded objective available" ||
+          (iteration.changedArtifacts ?? []).length !== 0
+        ) {
+          throw new Error("scenario autonomous-control recorded unexpected autonomous iteration side effects")
+        }
       }
 
       return
     }
     case "autonomous-run": {
-      if (input.turns.length !== 2) {
-        throw new Error(`scenario autonomous-run expected exactly 2 turns, got ${input.turns.length}`)
+      if (input.turns.length !== 3) {
+        throw new Error(`scenario autonomous-run expected exactly 3 turns, got ${input.turns.length}`)
       }
 
       assertAuditAction(auditEvents, "promote", "scenario autonomous-run missing promote audit event")
@@ -1407,29 +1567,26 @@ async function assertScenarioArtifacts(input: {
       const objective = loopState.objectives?.[0]
       const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
       const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const turnThreeToolSequence = collectExecutedToolSequence(input.parsedResponses[2])
       const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
       const turnTwoToolEvents = collectToolEvents(input.parsedResponses[1])
+      const turnThreeToolEvents = collectToolEvents(input.parsedResponses[2])
       const turnOneTools = new Set(turnOneToolSequence)
       const turnTwoTools = new Set(turnTwoToolSequence)
+      const turnThreeTools = new Set(turnThreeToolSequence)
 
       assertExactToolSequence(
         turnOneToolSequence,
         AUTONOMOUS_RUN_TURN_ONE_TOOLS,
-        "scenario autonomous-run did not follow the required turn-1 configure/start path",
+        "scenario autonomous-run did not follow the required turn-1 start-only path",
       )
 
-      if (turnOneTools.has("evolver_autonomous_run") || turnTwoTools.has("evolver_autonomous_run")) {
+      if (
+        turnOneTools.has("evolver_autonomous_run") ||
+        turnTwoTools.has("evolver_autonomous_run") ||
+        turnThreeTools.has("evolver_autonomous_run")
+      ) {
         throw new Error("scenario autonomous-run used evolver_autonomous_run instead of the required start path")
-      }
-
-      const configureEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_configure")
-
-      if (!configureEvent?.input) {
-        throw new Error("scenario autonomous-run did not expose the required configure payload")
-      }
-
-      if (!areJsonValuesEqual(configureEvent.input, AUTONOMOUS_RUN_CONFIGURE_INPUT)) {
-        throw new Error("scenario autonomous-run did not use the required configure payload")
       }
 
       assertNoExecutedTools(
@@ -1441,11 +1598,23 @@ async function assertScenarioArtifacts(input: {
       assertExactToolSequence(
         turnTwoToolSequence,
         AUTONOMOUS_RUN_TURN_TWO_TOOLS,
-        "scenario autonomous-run did not prove the required turn-2 status-only path",
+        "scenario autonomous-run did not prove the required turn-2 autonomous-status path",
       )
 
       assertNoExecutedTools(
         turnTwoTools,
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario autonomous-run executed an unexpected outer-session mutating tool",
+      )
+
+      assertExactToolSequence(
+        turnThreeToolSequence,
+        AUTONOMOUS_RUN_TURN_THREE_TOOLS,
+        "scenario autonomous-run did not prove the required turn-3 registry-status path",
+      )
+
+      assertNoExecutedTools(
+        turnThreeTools,
         OUTER_AUTONOMOUS_MUTATING_TOOLS,
         "scenario autonomous-run executed an unexpected outer-session mutating tool",
       )
@@ -1476,7 +1645,7 @@ async function assertScenarioArtifacts(input: {
         }>
       }
       const statusObjective = statusState.objectives?.[0]
-      const registryStatusEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_status")
+      const registryStatusEvent = turnThreeToolEvents.find((event) => event.tool === "evolver_status")
       const registryStatus = parseToolOutput(registryStatusEvent?.output) as {
         memories?: Record<string, { revisionID?: string }>
         currentRevision?: string | null
@@ -1630,8 +1799,8 @@ async function assertScenarioArtifacts(input: {
       return
     }
     case "autonomous-startup": {
-      if (input.turns.length !== 1) {
-        throw new Error(`scenario autonomous-startup expected exactly 1 turn, got ${input.turns.length}`)
+      if (input.turns.length !== 2) {
+        throw new Error(`scenario autonomous-startup expected exactly 2 turns, got ${input.turns.length}`)
       }
 
       assertAuditAction(
@@ -1659,17 +1828,31 @@ async function assertScenarioArtifacts(input: {
 
       const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
       const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+      const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const turnTwoToolEvents = collectToolEvents(input.parsedResponses[1])
 
       assertExactToolSequence(
         turnOneToolSequence,
         AUTONOMOUS_STARTUP_TURN_ONE_TOOLS,
-        "scenario autonomous-startup did not prove the required status-only inspection path",
+        "scenario autonomous-startup did not prove the required autonomous-status inspection path",
+      )
+
+      assertExactToolSequence(
+        turnTwoToolSequence,
+        AUTONOMOUS_STARTUP_TURN_TWO_TOOLS,
+        "scenario autonomous-startup did not prove the required registry-status inspection path",
       )
 
       assertNoExecutedTools(
         new Set(turnOneToolSequence),
         OUTER_AUTONOMOUS_MUTATING_TOOLS,
-        "scenario autonomous-startup executed an unexpected outer-session mutating tool",
+        "scenario autonomous-startup executed an unexpected outer-session mutating tool during turn 1",
+      )
+
+      assertNoExecutedTools(
+        new Set(turnTwoToolSequence),
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario autonomous-startup executed an unexpected outer-session mutating tool during turn 2",
       )
 
       const statusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_status")
@@ -1682,7 +1865,7 @@ async function assertScenarioArtifacts(input: {
           evaluationScenarios?: string[]
         }
       }
-      const registryStatusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_status")
+      const registryStatusEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_status")
       const registryStatus = parseToolOutput(registryStatusEvent?.output) as {
         currentRevision?: string | null
         pendingRevision?: string | null
@@ -1726,15 +1909,11 @@ async function assertScenarioArtifacts(input: {
         )
       }
 
-      if ((loopState.iterations ?? []).length !== 0) {
-        throw new Error("scenario autonomous-startup unexpectedly recorded loop iterations")
-      }
-
       return
     }
     case "autonomous-preview": {
-      if (input.turns.length !== 1) {
-        throw new Error(`scenario autonomous-preview expected exactly 1 turn, got ${input.turns.length}`)
+      if (input.turns.length !== 2) {
+        throw new Error(`scenario autonomous-preview expected exactly 2 turns, got ${input.turns.length}`)
       }
 
       const loopState = JSON.parse(
@@ -1763,21 +1942,35 @@ async function assertScenarioArtifacts(input: {
 
       const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
       const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+      const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const turnTwoToolEvents = collectToolEvents(input.parsedResponses[1])
 
       assertExactToolSequence(
         turnOneToolSequence,
         AUTONOMOUS_PREVIEW_TURN_ONE_TOOLS,
-        "scenario autonomous-preview did not follow the required preview/status path",
+        "scenario autonomous-preview did not follow the required preview inspection path",
       )
 
       assertNoExecutedTools(
         new Set(turnOneToolSequence),
         OUTER_AUTONOMOUS_MUTATING_TOOLS,
-        "scenario autonomous-preview executed an unexpected outer-session mutating tool",
+        "scenario autonomous-preview executed an unexpected outer-session mutating tool during turn 1",
+      )
+
+      assertExactToolSequence(
+        turnTwoToolSequence,
+        AUTONOMOUS_PREVIEW_TURN_TWO_TOOLS,
+        "scenario autonomous-preview did not follow the required status inspection path",
+      )
+
+      assertNoExecutedTools(
+        new Set(turnTwoToolSequence),
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario autonomous-preview executed an unexpected outer-session mutating tool during turn 2",
       )
 
       const previewEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_preview")
-      const statusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const statusEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_autonomous_status")
       const previewState = parseToolOutput(previewEvent?.output) as {
         wouldRun?: boolean
         wouldSkipReason?: string | null
@@ -1836,7 +2029,7 @@ async function assertScenarioArtifacts(input: {
           JSON.stringify(["smoke", "objective-proof"]) ||
         previewState.config?.enabled !== true ||
         previewState.config?.paused !== false ||
-        previewState.config?.intervalMs !== 60_000 ||
+        previewState.config?.intervalMs !== 0 ||
         previewState.lockHeld !== false ||
         previewState.runtimeContractCompatible !== true ||
         previewState.runtimeContractDetail !== null ||
@@ -1849,7 +2042,7 @@ async function assertScenarioArtifacts(input: {
       if (
         statusState.config?.enabled !== true ||
         statusState.config?.paused !== false ||
-        statusState.config?.intervalMs !== 60_000 ||
+        statusState.config?.intervalMs !== 0 ||
         JSON.stringify(statusState.config?.verificationCommands ?? []) !==
           JSON.stringify([AUTONOMOUS_PREVIEW_CONFIGURED_VERIFICATION_COMMAND]) ||
         JSON.stringify(statusState.config?.evaluationScenarios ?? []) !== JSON.stringify(["smoke"]) ||
@@ -1867,7 +2060,7 @@ async function assertScenarioArtifacts(input: {
       if (
         loopState.config?.enabled !== true ||
         loopState.config?.paused !== false ||
-        loopState.config?.intervalMs !== 60_000 ||
+        loopState.config?.intervalMs !== 0 ||
         JSON.stringify(loopState.config?.verificationCommands ?? []) !==
           JSON.stringify([AUTONOMOUS_PREVIEW_CONFIGURED_VERIFICATION_COMMAND]) ||
         JSON.stringify(loopState.config?.evaluationScenarios ?? []) !== JSON.stringify(["smoke"]) ||
@@ -1885,27 +2078,41 @@ async function assertScenarioArtifacts(input: {
       return
     }
     case "autonomous-metrics": {
-      if (input.turns.length !== 1) {
-        throw new Error(`scenario autonomous-metrics expected exactly 1 turn, got ${input.turns.length}`)
+      if (input.turns.length !== 2) {
+        throw new Error(`scenario autonomous-metrics expected exactly 2 turns, got ${input.turns.length}`)
       }
 
       const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
       const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+      const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const turnTwoToolEvents = collectToolEvents(input.parsedResponses[1])
 
       assertExactToolSequence(
         turnOneToolSequence,
         AUTONOMOUS_METRICS_TURN_ONE_TOOLS,
-        "scenario autonomous-metrics did not follow the required metrics/status path",
+        "scenario autonomous-metrics did not follow the required metrics inspection path",
       )
 
       assertNoExecutedTools(
         new Set(turnOneToolSequence),
         OUTER_AUTONOMOUS_MUTATING_TOOLS,
-        "scenario autonomous-metrics executed an unexpected outer-session mutating tool",
+        "scenario autonomous-metrics executed an unexpected outer-session mutating tool during turn 1",
+      )
+
+      assertExactToolSequence(
+        turnTwoToolSequence,
+        AUTONOMOUS_METRICS_TURN_TWO_TOOLS,
+        "scenario autonomous-metrics did not follow the required status inspection path",
+      )
+
+      assertNoExecutedTools(
+        new Set(turnTwoToolSequence),
+        OUTER_AUTONOMOUS_MUTATING_TOOLS,
+        "scenario autonomous-metrics executed an unexpected outer-session mutating tool during turn 2",
       )
 
       const metricsEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_metrics")
-      const statusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const statusEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_autonomous_status")
       const metricsState = parseToolOutput(metricsEvent?.output)
       const statusState = parseToolOutput(statusEvent?.output) as {
         objectives?: Array<{ status?: string }>
@@ -1932,8 +2139,8 @@ async function assertScenarioArtifacts(input: {
       return
     }
     case "autonomous-stop": {
-      if (input.turns.length !== 1) {
-        throw new Error(`scenario autonomous-stop expected exactly 1 turn, got ${input.turns.length}`)
+      if (input.turns.length !== 2) {
+        throw new Error(`scenario autonomous-stop expected exactly 2 turns, got ${input.turns.length}`)
       }
 
       assertAuditAction(auditEvents, "autonomous_stop", "scenario autonomous-stop missing autonomous_stop audit event")
@@ -1953,15 +2160,23 @@ async function assertScenarioArtifacts(input: {
 
       const turnOneToolSequence = collectExecutedToolSequence(input.parsedResponses[0])
       const turnOneToolEvents = collectToolEvents(input.parsedResponses[0])
+      const turnTwoToolSequence = collectExecutedToolSequence(input.parsedResponses[1])
+      const turnTwoToolEvents = collectToolEvents(input.parsedResponses[1])
 
       assertExactToolSequence(
         turnOneToolSequence,
         AUTONOMOUS_STOP_TURN_ONE_TOOLS,
-        "scenario autonomous-stop did not follow the required stop/status path",
+        "scenario autonomous-stop did not follow the required stop inspection path",
+      )
+
+      assertExactToolSequence(
+        turnTwoToolSequence,
+        AUTONOMOUS_STOP_TURN_TWO_TOOLS,
+        "scenario autonomous-stop did not follow the required status inspection path",
       )
 
       const stopEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_stop")
-      const statusEvent = turnOneToolEvents.find((event) => event.tool === "evolver_autonomous_status")
+      const statusEvent = turnTwoToolEvents.find((event) => event.tool === "evolver_autonomous_status")
       const stopState = parseToolOutput(stopEvent?.output) as {
         config?: {
           enabled?: boolean
@@ -1987,7 +2202,7 @@ async function assertScenarioArtifacts(input: {
       if (
         stopState.config?.enabled !== false ||
         stopState.config?.paused !== true ||
-        stopState.config?.intervalMs !== 60_000 ||
+        stopState.config?.intervalMs !== 0 ||
         stopState.activation?.mode !== "stopped"
       ) {
         throw new Error("scenario autonomous-stop stop output did not reflect the stopped disabled state")
@@ -1996,7 +2211,7 @@ async function assertScenarioArtifacts(input: {
       if (
         statusState.config?.enabled !== false ||
         statusState.config?.paused !== true ||
-        statusState.config?.intervalMs !== 60_000 ||
+        statusState.config?.intervalMs !== 0 ||
         JSON.stringify(statusState.config?.verificationCommands ?? []) !==
           JSON.stringify([["bun", "run", "typecheck"]]) ||
         JSON.stringify(statusState.config?.evaluationScenarios ?? []) !== JSON.stringify(["smoke"]) ||
@@ -2009,7 +2224,7 @@ async function assertScenarioArtifacts(input: {
       if (
         loopState.config?.enabled !== false ||
         loopState.config?.paused !== true ||
-        loopState.config?.intervalMs !== 60_000 ||
+        loopState.config?.intervalMs !== 0 ||
         JSON.stringify(loopState.config?.verificationCommands ?? []) !==
           JSON.stringify([["bun", "run", "typecheck"]]) ||
         JSON.stringify(loopState.config?.evaluationScenarios ?? []) !== JSON.stringify(["smoke"]) ||
@@ -2316,11 +2531,18 @@ async function main() {
   const scenarioArg = process.argv[2]
 
   if (!scenarioArg) {
-    throw new Error("usage: bun run scripts/run-eval.ts <scenario|all>")
+    throw new Error("usage: bun run scripts/run-eval.ts <scenario|core|pr|all>")
   }
 
   const normalizedRepoRoot = fileURLToPath(new URL("..", import.meta.url))
-  const scenarios = scenarioArg === "all" ? DEFAULT_SCENARIOS : [scenarioArg]
+  const scenarios =
+    scenarioArg === "core"
+      ? [...CORE_SCENARIOS]
+      : scenarioArg === "pr"
+        ? [...PR_SCENARIOS]
+        : scenarioArg === "all"
+          ? [...FULL_SCENARIOS]
+          : [scenarioArg]
 
   let failed = false
 

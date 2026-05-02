@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
+import * as evalHarness from "../../scripts/run-eval.ts"
 import {
   DEFAULT_SCENARIOS,
   runEvaluationScenario,
@@ -11,8 +13,12 @@ import {
 import { createOCEvolverPlugin } from "../../src/oc-evolver.ts"
 import { activateAutonomousLoop } from "../../src/kernel/autonomous-loop.ts"
 
-const AUTONOMOUS_RUN_OBJECTIVE_PROMPT =
-  'Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---\\nname: autonomous-evidence-memory\\ndescription: Autonomous evaluation evidence memory.\\n---\\n\\nAutonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.'
+const AUTONOMOUS_RUN_OBJECTIVE_PROMPT = `Make exactly one mutation by calling evolver_write_memory with memoryName "autonomous-evidence-memory" and document "---
+name: autonomous-evidence-memory
+description: Autonomous evaluation evidence memory.
+---
+
+Autonomous evaluation evidence memory.". After the write succeeds, respond with exactly one short confirmation sentence. Do not call evolver_autonomous_run. Do not call status tools before the write.`
 const AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND = ["bun", "--version"]
 const AUTONOMOUS_RUN_CONFIGURE_INPUT = {
   intervalMs: 0,
@@ -95,6 +101,32 @@ describe("evaluation scenarios", () => {
     await rm(repoRoot, { recursive: true, force: true })
   })
 
+  test("evaluation tiers keep the stable autonomous control-plane in regular runs", () => {
+    expect(evalHarness.CORE_SCENARIOS).toEqual([
+      "smoke",
+      "policy-deny",
+      "autonomous-run",
+      "autonomous-control",
+      "autonomous-startup",
+    ])
+    expect(evalHarness.PR_SCENARIOS).toEqual([
+      ...evalHarness.CORE_SCENARIOS,
+      "autonomous-preview",
+      "autonomous-metrics",
+      "autonomous-stop",
+    ])
+    expect(evalHarness.PR_SCENARIOS).not.toContain("objective-memory-evidence")
+    expect(evalHarness.FULL_SCENARIOS).toEqual(
+      expect.arrayContaining([
+        ...evalHarness.PR_SCENARIOS,
+        "objective-memory-evidence",
+      ]),
+    )
+    expect(evalHarness.FULL_SCENARIOS).not.toContain("command-runtime")
+    expect(evalHarness.FULL_SCENARIOS).not.toContain("reuse-skill")
+    expect(evalHarness.FULL_SCENARIOS).not.toContain("revision-lifecycle")
+  })
+
   test("autonomous-run uses a fixture-safe objective verification command", async () => {
     await writeFile(
       join(repoRoot, "eval/scenarios/autonomous-run.md"),
@@ -102,9 +134,13 @@ describe("evaluation scenarios", () => {
     )
 
     const scenarioDocument = await readFile(join(repoRoot, "eval/scenarios/autonomous-run.md"), "utf8")
+    const configuredPrompt = AUTONOMOUS_RUN_CONFIGURE_INPUT.objectives[0]?.prompt ?? ""
 
     expect(AUTONOMOUS_RUN_OBJECTIVE_VERIFICATION_COMMAND).toEqual(["bun", "--version"])
     expect(scenarioDocument).toContain('["bun", "--version"]')
+    expect(scenarioDocument).toContain("Exit successfully after the autonomous status read completes.")
+    expect(configuredPrompt).toContain('---\nname: autonomous-evidence-memory\ndescription: Autonomous evaluation evidence memory.\n---\n\nAutonomous evaluation evidence memory.')
+    expect(configuredPrompt).not.toContain("\\n")
   })
 
   test("command-runtime docs state that successful command runs persist merged session memory state", async () => {
@@ -120,9 +156,16 @@ describe("evaluation scenarios", () => {
     const scenarioDocument = await readFile(join(repoRoot, "eval/scenarios/command-runtime.md"), "utf8")
     const readmeDocument = await readFile(join(repoRoot, "README.md"), "utf8")
 
-    expect(scenarioDocument).toContain("successful command run leaves the continued session retaining both `session-routing` and `command-routing`")
+    expect(scenarioDocument).toContain("Turn 1:")
+    expect(scenarioDocument).not.toContain("Turn 2:")
+    expect(scenarioDocument).not.toContain("Turn 3:")
+    expect(scenarioDocument).toContain("The harness already seeds an accepted `review-markdown` command")
+    expect(scenarioDocument).toContain("Use `evolver_run_command` directly")
+    expect(scenarioDocument).toContain("Run `review-markdown` once against `README.md`.")
+    expect(scenarioDocument).toContain("Stop after the command finishes.")
+    expect(scenarioDocument).toContain("successful command run leaves the continued session retaining the command-owned runtime policy")
     expect(readmeDocument).toContain("after a successful command run")
-    expect(readmeDocument).toContain("persisting the resulting runtime policy and merged memory state for the continued session")
+    expect(readmeDocument).toContain("persisting the resulting runtime policy and merged command memory state for the continued session")
   })
 
   test("reuse-skill scenario continues the same session across turns and verifies persisted artifacts", async () => {
@@ -521,22 +564,19 @@ describe("evaluation scenarios", () => {
             '{"action":"promote","status":"success","revisionID":"rev-auto-1"}\n',
           )
 
-          return {
-            stdout: [
-                buildToolEvent("evolver_autonomous_configure", "ses-auto-1", AUTONOMOUS_RUN_CONFIGURE_INPUT),
-                buildToolEvent("evolver_autonomous_start", "ses-auto-1", {}),
-            ].join("\n"),
-            stderr: "",
-            exitCode: 0,
-          } satisfies EvalCommandResult
-        }
+            return {
+              stdout: buildToolEvent("evolver_autonomous_start", "ses-auto-1", {}),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
 
-        expect(prompt).toContain("Turn 2")
+          if (executionCount === 2) {
+            expect(prompt).toContain("Turn 2")
 
-        return {
-          stdout: [
-            buildToolEvent(
-              "evolver_autonomous_status",
+            return {
+              stdout: buildToolEvent(
+                "evolver_autonomous_status",
               "ses-auto-1",
               {},
               JSON.stringify({
@@ -569,29 +609,36 @@ describe("evaluation scenarios", () => {
                 ],
               }),
             ),
-                buildToolEvent(
-                  "evolver_status",
-                  "ses-auto-1",
-                  {},
-                  JSON.stringify({
-                    skills: {},
-                    agents: {},
-                    commands: {},
-                    memories: {
-                      "autonomous-evidence-memory": {
-                        kind: "memory",
-                        name: "autonomous-evidence-memory",
-                        nativePath: ".opencode/memory/autonomous-evidence-memory.md",
-                        revisionID: "rev-auto-1",
-                        contentHash: "ab".repeat(32),
-                      },
-                    },
-                    quarantine: {},
-                    currentRevision: "rev-auto-1",
-                    pendingRevision: null,
-                  }),
-                ),
-          ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        }
+
+        expect(prompt).toContain("Turn 3")
+
+        return {
+          stdout: buildToolEvent(
+            "evolver_status",
+            "ses-auto-1",
+            {},
+            JSON.stringify({
+              skills: {},
+              agents: {},
+              commands: {},
+              memories: {
+                "autonomous-evidence-memory": {
+                  kind: "memory",
+                  name: "autonomous-evidence-memory",
+                  nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                  revisionID: "rev-auto-1",
+                  contentHash: "ab".repeat(32),
+                },
+              },
+              quarantine: {},
+              currentRevision: "rev-auto-1",
+              pendingRevision: null,
+            }),
+          ),
           stderr: "",
           exitCode: 0,
         } satisfies EvalCommandResult
@@ -607,12 +654,13 @@ describe("evaluation scenarios", () => {
     }>
      
     expect(DEFAULT_SCENARIOS).toContain("autonomous-run")
-    expect(resultJson.turnCount).toBe(2)
+    expect(resultJson.turnCount).toBe(3)
     expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/autonomous-loop.json")
     expect(resultJson.changedFiles).toContain(".opencode/memory/autonomous-evidence-memory.md")
-    expect(turns).toHaveLength(2)
+    expect(turns).toHaveLength(3)
     expect(turns[0]?.sessionID).toBe("ses-auto-1")
     expect(turns[1]?.sessionID).toBe("ses-auto-1")
+    expect(turns[2]?.sessionID).toBe("ses-auto-1")
   })
 
   test("autonomous-run scenario rejects promoted-looking results that lack explicit completion evidence", async () => {
@@ -711,18 +759,15 @@ describe("evaluation scenarios", () => {
             )
 
             return {
-              stdout: [
-                buildToolEvent("evolver_autonomous_configure", "ses-auto-2", AUTONOMOUS_RUN_CONFIGURE_INPUT),
-                buildToolEvent("evolver_autonomous_start", "ses-auto-2", {}),
-              ].join("\n"),
+              stdout: buildToolEvent("evolver_autonomous_start", "ses-auto-2", {}),
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
           }
 
-          return {
-            stdout: [
-              buildToolEvent(
+          if (executionCount === 2) {
+            return {
+              stdout: buildToolEvent(
                 "evolver_autonomous_status",
                 "ses-auto-2",
                 {},
@@ -748,21 +793,26 @@ describe("evaluation scenarios", () => {
                   ],
                 }),
               ),
-                buildToolEvent(
-                  "evolver_status",
-                  "ses-auto-2",
-                  {},
-                  JSON.stringify({
-                    skills: {},
-                    agents: {},
-                    commands: {},
-                    memories: {},
-                    quarantine: {},
-                    currentRevision: "rev-auto-2",
-                    pendingRevision: null,
-                  }),
-                ),
-            ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: buildToolEvent(
+              "evolver_status",
+              "ses-auto-2",
+              {},
+              JSON.stringify({
+                skills: {},
+                agents: {},
+                commands: {},
+                memories: {},
+                quarantine: {},
+                currentRevision: "rev-auto-2",
+                pendingRevision: null,
+              }),
+            ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -893,18 +943,15 @@ describe("evaluation scenarios", () => {
             )
 
             return {
-              stdout: [
-                buildToolEvent("evolver_autonomous_configure", "ses-auto-stale", AUTONOMOUS_RUN_CONFIGURE_INPUT),
-                buildToolEvent("evolver_autonomous_start", "ses-auto-stale", {}),
-              ].join("\n"),
+              stdout: buildToolEvent("evolver_autonomous_start", "ses-auto-stale", {}),
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
           }
 
-          return {
-            stdout: [
-              buildToolEvent(
+          if (executionCount === 2) {
+            return {
+              stdout: buildToolEvent(
                 "evolver_autonomous_status",
                 "ses-auto-stale",
                 {},
@@ -930,29 +977,34 @@ describe("evaluation scenarios", () => {
                   ],
                 }),
               ),
-              buildToolEvent(
-                "evolver_status",
-                "ses-auto-stale",
-                {},
-                JSON.stringify({
-                  skills: {},
-                  agents: {},
-                  commands: {},
-                  memories: {
-                    "autonomous-evidence-memory": {
-                      kind: "memory",
-                      name: "autonomous-evidence-memory",
-                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
-                      revisionID: "rev-auto-stale",
-                      contentHash: "ab".repeat(32),
-                    },
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: buildToolEvent(
+              "evolver_status",
+              "ses-auto-stale",
+              {},
+              JSON.stringify({
+                skills: {},
+                agents: {},
+                commands: {},
+                memories: {
+                  "autonomous-evidence-memory": {
+                    kind: "memory",
+                    name: "autonomous-evidence-memory",
+                    nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                    revisionID: "rev-auto-stale",
+                    contentHash: "ab".repeat(32),
                   },
-                  quarantine: {},
-                  currentRevision: "rev-auto-stale",
-                  pendingRevision: null,
-                }),
-              ),
-            ].join("\n"),
+                },
+                quarantine: {},
+                currentRevision: "rev-auto-stale",
+                pendingRevision: null,
+              }),
+            ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -961,7 +1013,7 @@ describe("evaluation scenarios", () => {
     ).rejects.toThrow(/status output|queued objective|completed/i)
   })
 
-  test("autonomous-run scenario rejects runs with the wrong configure payload", async () => {
+  test("autonomous-run scenario rejects runs that use configure instead of the required start path", async () => {
     await writeFile(
       join(repoRoot, "eval/scenarios/autonomous-run.md"),
       await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
@@ -1083,53 +1135,52 @@ describe("evaluation scenarios", () => {
             )
 
             return {
-              stdout: [
-                buildToolEvent("evolver_autonomous_configure", "ses-auto-2b", {
-                  ...AUTONOMOUS_RUN_CONFIGURE_INPUT,
-                  verificationCommands: [["bun", "run", "typecheck"]],
-                }),
-                buildToolEvent("evolver_autonomous_start", "ses-auto-2b", {}),
-              ].join("\n"),
+              stdout: buildToolEvent("evolver_autonomous_configure", "ses-auto-2b", AUTONOMOUS_RUN_CONFIGURE_INPUT),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          if (executionCount === 2) {
+            return {
+              stdout: buildToolEvent("evolver_autonomous_status", "ses-auto-2b", {}),
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
           }
 
           return {
-            stdout: [
-              buildToolEvent("evolver_autonomous_status", "ses-auto-2b", {}),
-              buildToolEvent(
-                "evolver_status",
-                "ses-auto-2b",
-                {},
-                JSON.stringify({
-                  skills: {},
-                  agents: {},
-                  commands: {},
-                  memories: {
-                    "autonomous-evidence-memory": {
-                      kind: "memory",
-                      name: "autonomous-evidence-memory",
-                      nativePath: ".opencode/memory/autonomous-evidence-memory.md",
-                      revisionID: "rev-auto-2b",
-                      contentHash: "ab".repeat(32),
-                    },
+            stdout: buildToolEvent(
+              "evolver_status",
+              "ses-auto-2b",
+              {},
+              JSON.stringify({
+                skills: {},
+                agents: {},
+                commands: {},
+                memories: {
+                  "autonomous-evidence-memory": {
+                    kind: "memory",
+                    name: "autonomous-evidence-memory",
+                    nativePath: ".opencode/memory/autonomous-evidence-memory.md",
+                    revisionID: "rev-auto-2b",
+                    contentHash: "ab".repeat(32),
                   },
-                  quarantine: {},
-                  currentRevision: "rev-auto-2b",
-                  pendingRevision: null,
-                }),
-              ),
-            ].join("\n"),
+                },
+                quarantine: {},
+                currentRevision: "rev-auto-2b",
+                pendingRevision: null,
+              }),
+            ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/configure payload/i)
+    ).rejects.toThrow(/turn-1 start-only path/i)
   })
 
-  test("autonomous-run scenario rejects runs that skip the required turn-2 status reads", async () => {
+  test("autonomous-run scenario rejects runs that skip the required turn-2 autonomous status read", async () => {
     await writeFile(
       join(repoRoot, "eval/scenarios/autonomous-run.md"),
       await readFile(new URL("../../eval/scenarios/autonomous-run.md", import.meta.url), "utf8"),
@@ -1251,10 +1302,7 @@ describe("evaluation scenarios", () => {
             )
 
             return {
-              stdout: [
-                buildToolEvent("evolver_autonomous_configure", "ses-auto-3", AUTONOMOUS_RUN_CONFIGURE_INPUT),
-                buildToolEvent("evolver_autonomous_start", "ses-auto-3", {}),
-              ].join("\n"),
+              stdout: buildToolEvent("evolver_autonomous_start", "ses-auto-3", {}),
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
@@ -1267,7 +1315,7 @@ describe("evaluation scenarios", () => {
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/turn-2 status/i)
+    ).rejects.toThrow(/turn-2 autonomous-status/i)
   })
 
   test("autonomous-run scenario rejects runs that execute extra tools in turn 2", async () => {
@@ -1392,10 +1440,7 @@ describe("evaluation scenarios", () => {
             )
 
             return {
-              stdout: [
-                buildToolEvent("evolver_autonomous_configure", "ses-auto-4", AUTONOMOUS_RUN_CONFIGURE_INPUT),
-                buildToolEvent("evolver_autonomous_start", "ses-auto-4", {}),
-              ].join("\n"),
+              stdout: buildToolEvent("evolver_autonomous_start", "ses-auto-4", {}),
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
@@ -1404,7 +1449,6 @@ describe("evaluation scenarios", () => {
           return {
             stdout: [
               '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-auto-4"}',
-              '{"type":"tool","tool":"evolver_status","sessionID":"ses-auto-4"}',
               '{"type":"tool","tool":"evolver_write_memory","sessionID":"ses-auto-4"}',
             ].join("\n"),
             stderr: "",
@@ -1412,10 +1456,10 @@ describe("evaluation scenarios", () => {
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/turn-2 status-only path|mutating tool/i)
+    ).rejects.toThrow(/turn-2 autonomous-status path|mutating tool/i)
   })
 
-  test("autonomous-run scenario rejects runs that add an unexpected third turn", async () => {
+  test("autonomous-run scenario rejects runs that add an unexpected fourth turn", async () => {
     const autonomousRunPrompt = await readFile(
       new URL("../../eval/scenarios/autonomous-run.md", import.meta.url),
       "utf8",
@@ -1423,7 +1467,7 @@ describe("evaluation scenarios", () => {
 
     await writeFile(
       join(repoRoot, "eval/scenarios/autonomous-run.md"),
-      `${autonomousRunPrompt}\n\n---\n\nTurn 3:\n\nSay \"extra turn\".`,
+        `${autonomousRunPrompt}\n\n---\n\nTurn 4:\n\nSay \"extra turn\".`,
     )
 
     let executionCount = 0
@@ -1542,10 +1586,7 @@ describe("evaluation scenarios", () => {
             )
 
             return {
-              stdout: [
-                buildToolEvent("evolver_autonomous_configure", "ses-auto-5", AUTONOMOUS_RUN_CONFIGURE_INPUT),
-                buildToolEvent("evolver_autonomous_start", "ses-auto-5", {}),
-              ].join("\n"),
+              stdout: '{"type":"tool","tool":"evolver_autonomous_start","sessionID":"ses-auto-5"}',
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
@@ -1553,10 +1594,15 @@ describe("evaluation scenarios", () => {
 
           if (executionCount === 2) {
             return {
-              stdout: [
-                '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-auto-5"}',
-                '{"type":"tool","tool":"evolver_status","sessionID":"ses-auto-5"}',
-              ].join("\n"),
+              stdout: '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-auto-5"}',
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          if (executionCount === 3) {
+            return {
+              stdout: '{"type":"tool","tool":"evolver_status","sessionID":"ses-auto-5"}',
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
@@ -1569,7 +1615,7 @@ describe("evaluation scenarios", () => {
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/exactly 2 turns/i)
+    ).rejects.toThrow(/exactly 3 turns/i)
   })
 
   test("objective-memory-evidence scenario rejects runs that skip the required status reads", async () => {
@@ -1591,7 +1637,7 @@ describe("evaluation scenarios", () => {
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/status-only|status.*read/i)
+    ).rejects.toThrow(/turn-1 autonomous status path|required status/i)
   })
 
   test("objective-memory-evidence scenario rejects runs that execute mutating tools", async () => {
@@ -1605,19 +1651,22 @@ describe("evaluation scenarios", () => {
         repoRoot,
         scenarioName: "objective-memory-evidence",
         timestamp: "2026-04-30T14-19-00.000Z",
-        executeCommand: async () => {
+        executeCommand: async ({ command }) => {
+          const isFollowupTurn = command.includes("--session")
+
           return {
-            stdout: [
-              '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-2"}',
-              '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-2"}',
-              '{"type":"tool","tool":"evolver_write_memory","sessionID":"ses-objective-2"}',
-            ].join("\n"),
+            stdout: isFollowupTurn
+              ? [
+                  '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-2"}',
+                  '{"type":"tool","tool":"evolver_write_memory","sessionID":"ses-objective-2"}',
+                ].join("\n")
+              : '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-2"}',
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/status-only|mutating tool/i)
+    ).rejects.toThrow(/turn-2 registry status path|mutating tool/i)
   })
 
   test("objective-memory-evidence scenario rejects runs that execute non-evolver mutating tools", async () => {
@@ -1631,19 +1680,22 @@ describe("evaluation scenarios", () => {
         repoRoot,
         scenarioName: "objective-memory-evidence",
         timestamp: "2026-04-30T14-21-00.000Z",
-        executeCommand: async () => {
+        executeCommand: async ({ command }) => {
+          const isFollowupTurn = command.includes("--session")
+
           return {
-            stdout: [
-              '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-3"}',
-              '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-3"}',
-              '{"type":"tool","tool":"apply_patch","sessionID":"ses-objective-3"}',
-            ].join("\n"),
+            stdout: isFollowupTurn
+              ? [
+                  '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-3"}',
+                  '{"type":"tool","tool":"apply_patch","sessionID":"ses-objective-3"}',
+                ].join("\n")
+              : '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-3"}',
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/status-only/i)
+    ).rejects.toThrow(/turn-2 registry status path|status-only/i)
   })
 
   test("objective-memory-evidence scenario allows the registry status artifact when the required status reads are the only tools used", async () => {
@@ -1656,7 +1708,7 @@ describe("evaluation scenarios", () => {
       repoRoot,
       scenarioName: "objective-memory-evidence",
       timestamp: "2026-05-02T00-15-00.000Z",
-      executeCommand: async ({ workspaceRoot }) => {
+      executeCommand: async ({ workspaceRoot, command }) => {
         await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
         await writeFile(
           join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
@@ -1676,10 +1728,9 @@ describe("evaluation scenarios", () => {
         )
 
         return {
-          stdout: [
-            '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-allowed"}',
-            '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-allowed"}',
-          ].join("\n"),
+          stdout: command.includes("--session")
+            ? '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-allowed"}'
+            : '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-allowed"}',
           stderr: "",
           exitCode: 0,
         } satisfies EvalCommandResult
@@ -1688,6 +1739,7 @@ describe("evaluation scenarios", () => {
 
     const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
       changedFiles: string[]
+      turnCount: number
     }
 
     expect(resultJson.changedFiles).toEqual([".opencode/oc-evolver/registry.json"])
@@ -1716,10 +1768,15 @@ describe("evaluation scenarios", () => {
 
           if (executionCount === 1) {
             return {
-              stdout: [
-                '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-4"}',
-                '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-4"}',
-              ].join("\n"),
+              stdout: '{"type":"tool","tool":"evolver_autonomous_status","sessionID":"ses-objective-4"}',
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          if (executionCount === 2) {
+            return {
+              stdout: '{"type":"tool","tool":"evolver_status","sessionID":"ses-objective-4"}',
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
@@ -1732,10 +1789,10 @@ describe("evaluation scenarios", () => {
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/exactly 1 turn/i)
+    ).rejects.toThrow(/exactly 2 turns/i)
   })
 
-  test("command-runtime scenario is part of the default sweep and captures memory-command session artifacts", async () => {
+  test("command-runtime scenario unit coverage captures command-owned runtime session artifacts", async () => {
     await writeFile(
       join(repoRoot, "eval/scenarios/command-runtime.md"),
       await readFile(new URL("../../eval/scenarios/command-runtime.md", import.meta.url), "utf8"),
@@ -1746,70 +1803,41 @@ describe("evaluation scenarios", () => {
       scenarioName: "command-runtime",
       timestamp: "2026-04-30T14-30-00.000Z",
       executeCommand: async ({ workspaceRoot }) => {
-        await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
-        await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
         await mkdir(join(workspaceRoot, ".opencode/oc-evolver/sessions"), { recursive: true })
-        await writeFile(
-          join(workspaceRoot, ".opencode/memory/session-routing.md"),
-          [
-            "---",
-            "name: session-routing",
-            "description: Session runtime guidance.",
-            "storage_mode: memory-and-artifact",
-            "---",
-            "",
-            "Prefer session-applied guidance.",
-            "",
-          ].join("\n"),
+
+        const seededRegistry = JSON.parse(
+          await readFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), "utf8"),
+        ) as {
+          commands: Record<string, { contentHash?: string }>
+          memories: Record<string, { contentHash?: string }>
+        }
+        const seededSessionRouting = await readFile(join(workspaceRoot, ".opencode/memory/session-routing.md"), "utf8")
+        const seededCommandRouting = await readFile(join(workspaceRoot, ".opencode/memory/command-routing.md"), "utf8")
+        const seededReviewCommand = await readFile(join(workspaceRoot, ".opencode/commands/review-markdown.md"), "utf8")
+
+        expect(seededRegistry.memories["session-routing"]?.contentHash).toBe(
+          createHash("sha256").update(seededSessionRouting).digest("hex"),
         )
-        await writeFile(
-          join(workspaceRoot, ".opencode/memory/command-routing.md"),
-          [
-            "---",
-            "name: command-routing",
-            "description: Command runtime guidance.",
-            "storage_mode: memory-and-artifact",
-            "---",
-            "",
-            "Prefer command-owned guidance.",
-            "",
-          ].join("\n"),
+        expect(seededRegistry.memories["command-routing"]?.contentHash).toBe(
+          createHash("sha256").update(seededCommandRouting).digest("hex"),
         )
-        await writeFile(
-          join(workspaceRoot, ".opencode/commands/review-markdown.md"),
-          [
-            "---",
-            "description: Review markdown with command-owned runtime metadata",
-            "model: openai/gpt-5.4",
-            "memory:",
-            "  - command-routing",
-            "permission:",
-            "  edit: deny",
-            "---",
-            "",
-            "Review README.md for markdown issues.",
-            "",
-          ].join("\n"),
+        expect(seededRegistry.commands["review-markdown"]?.contentHash).toBe(
+          createHash("sha256").update(seededReviewCommand).digest("hex"),
         )
+        expect(seededReviewCommand).toContain('Respond with exactly "README.md reviewed." and stop.')
+
         await writeFile(
           join(workspaceRoot, ".opencode/oc-evolver/sessions/session-command-runtime-green.json"),
           `${JSON.stringify(
             {
               memories: {
-                "session-routing": {
-                  storageMode: "memory-and-artifact",
-                },
-                "command-routing": {
-                  storageMode: "memory-and-artifact",
-                },
+                "command-routing": { storageMode: "memory-and-artifact" },
               },
               operatorGuideApplied: true,
               runtimePolicy: {
                 sourceKind: "command",
                 sourceName: "review-markdown",
-                toolPermissions: {
-                  edit: "deny",
-                },
+                toolPermissions: { edit: "deny" },
                 preferredModel: "openai/gpt-5.4",
               },
             },
@@ -1818,74 +1846,15 @@ describe("evaluation scenarios", () => {
           )}\n`,
         )
         await writeFile(
-          join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
-          JSON.stringify(
-            {
-              skills: {},
-              agents: {},
-              commands: {
-                "review-markdown": {
-                  kind: "command",
-                  name: "review-markdown",
-                  nativePath: ".opencode/commands/review-markdown.md",
-                  revisionID: "rev-command-runtime",
-                  contentHash: "d".repeat(64),
-                },
-              },
-              memories: {
-                "session-routing": {
-                  kind: "memory",
-                  name: "session-routing",
-                  nativePath: ".opencode/memory/session-routing.md",
-                  revisionID: "rev-command-runtime",
-                  contentHash: "c".repeat(64),
-                },
-                "command-routing": {
-                  kind: "memory",
-                  name: "command-routing",
-                  nativePath: ".opencode/memory/command-routing.md",
-                  revisionID: "rev-command-runtime",
-                  contentHash: "e".repeat(64),
-                },
-              },
-              quarantine: {},
-              currentRevision: "rev-command-runtime",
-              pendingRevision: null,
-            },
-            null,
-            2,
-          ),
-        )
-        await writeFile(
           join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-          [
-            JSON.stringify({ action: "write_memory", status: "success" }),
-            JSON.stringify({ action: "write_memory", status: "success" }),
-            JSON.stringify({ action: "apply_memory", status: "success" }),
-            JSON.stringify({ action: "write_command", status: "success" }),
-            JSON.stringify({ action: "run_command", status: "success" }),
-          ].join("\n") + "\n",
+          JSON.stringify({ action: "run_command", status: "success" }) + "\n",
         )
 
         return {
-          stdout: [
-            buildToolEvent("evolver_write_memory", "session-command-runtime-green", {
-              memoryName: "session-routing",
-            }),
-            buildToolEvent("evolver_write_memory", "session-command-runtime-green", {
-              memoryName: "command-routing",
-            }),
-            buildToolEvent("evolver_apply_memory", "session-command-runtime-green", {
-              memoryName: "session-routing",
-            }),
-            buildToolEvent("evolver_write_command", "session-command-runtime-green", {
-              commandName: "review-markdown",
-            }),
-            buildToolEvent("evolver_run_command", "session-command-runtime-green", {
-              commandName: "review-markdown",
-              prompt: "Review README.md.",
-            }),
-          ].join("\n"),
+          stdout: buildToolEvent("evolver_run_command", "session-command-runtime-green", {
+            commandName: "review-markdown",
+            prompt: "Review README.md.",
+          }),
           stderr: "",
           exitCode: 0,
         } satisfies EvalCommandResult
@@ -1894,9 +1863,11 @@ describe("evaluation scenarios", () => {
 
     const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
       changedFiles: string[]
+      turnCount: number
     }
 
-    expect(DEFAULT_SCENARIOS).toContain("command-runtime")
+    expect(evalHarness.FULL_SCENARIOS).not.toContain("command-runtime")
+    expect(resultJson.turnCount).toBe(1)
     expect(resultJson.changedFiles).toContain(".opencode/memory/session-routing.md")
     expect(resultJson.changedFiles).toContain(".opencode/memory/command-routing.md")
     expect(resultJson.changedFiles).toContain(".opencode/commands/review-markdown.md")
@@ -1905,7 +1876,7 @@ describe("evaluation scenarios", () => {
     )
   })
 
-  test("command-runtime scenario rejects runs that apply the wrong memory profile", async () => {
+  test("command-runtime scenario rejects runs that use the wrong command name", async () => {
     await writeFile(
       join(repoRoot, "eval/scenarios/command-runtime.md"),
       await readFile(new URL("../../eval/scenarios/command-runtime.md", import.meta.url), "utf8"),
@@ -1917,48 +1888,27 @@ describe("evaluation scenarios", () => {
         scenarioName: "command-runtime",
         timestamp: "2026-04-30T14-30-30.000Z",
         executeCommand: async ({ workspaceRoot }) => {
-          await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
-          await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
           await mkdir(join(workspaceRoot, ".opencode/oc-evolver/sessions"), { recursive: true })
           await writeFile(
-            join(workspaceRoot, ".opencode/memory/session-routing.md"),
-            ["---", "name: session-routing", "description: Session runtime guidance.", "storage_mode: memory-and-artifact", "---", "", "Prefer session-applied guidance.", ""].join("\n"),
-          )
-          await writeFile(
-            join(workspaceRoot, ".opencode/memory/command-routing.md"),
-            ["---", "name: command-routing", "description: Command runtime guidance.", "storage_mode: memory-and-artifact", "---", "", "Prefer command-owned guidance.", ""].join("\n"),
-          )
-          await writeFile(
-            join(workspaceRoot, ".opencode/commands/review-markdown.md"),
-            ["---", "description: Review markdown with command-owned runtime metadata", "model: openai/gpt-5.4", "memory:", "  - command-routing", "permission:", "  edit: deny", "---", "", "Review README.md for markdown issues.", ""].join("\n"),
-          )
-          await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/sessions/session-command-runtime-bad-memory.json"),
-            `${JSON.stringify({ memories: { "session-routing": { storageMode: "memory-and-artifact" }, "command-routing": { storageMode: "memory-and-artifact" } }, operatorGuideApplied: true, runtimePolicy: { sourceKind: "command", sourceName: "review-markdown", toolPermissions: { edit: "deny" }, preferredModel: "openai/gpt-5.4" } }, null, 2)}\n`,
+            `${JSON.stringify({ memories: { "command-routing": { storageMode: "memory-and-artifact" } }, operatorGuideApplied: true, runtimePolicy: { sourceKind: "command", sourceName: "review-markdown", toolPermissions: { edit: "deny" }, preferredModel: "openai/gpt-5.4" } }, null, 2)}\n`,
           )
           await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
-            JSON.stringify({ skills: {}, agents: {}, commands: { "review-markdown": { kind: "command", name: "review-markdown", nativePath: ".opencode/commands/review-markdown.md", revisionID: "rev-command-runtime", contentHash: "d".repeat(64) } }, memories: { "session-routing": { kind: "memory", name: "session-routing", nativePath: ".opencode/memory/session-routing.md", revisionID: "rev-command-runtime", contentHash: "c".repeat(64) }, "command-routing": { kind: "memory", name: "command-routing", nativePath: ".opencode/memory/command-routing.md", revisionID: "rev-command-runtime", contentHash: "e".repeat(64) } }, quarantine: {}, currentRevision: "rev-command-runtime", pendingRevision: null }, null, 2),
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            JSON.stringify({ action: "run_command", status: "success" }) + "\n",
           )
-          await writeFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), [JSON.stringify({ action: "write_memory", status: "success" }), JSON.stringify({ action: "write_memory", status: "success" }), JSON.stringify({ action: "apply_memory", status: "success" }), JSON.stringify({ action: "write_command", status: "success" }), JSON.stringify({ action: "run_command", status: "success" })].join("\n") + "\n")
 
           return {
-            stdout: [
-              buildToolEvent("evolver_write_memory", "session-command-runtime-bad-memory", { memoryName: "session-routing" }),
-              buildToolEvent("evolver_write_memory", "session-command-runtime-bad-memory", { memoryName: "command-routing" }),
-              buildToolEvent("evolver_apply_memory", "session-command-runtime-bad-memory", { memoryName: "command-routing" }),
-              buildToolEvent("evolver_write_command", "session-command-runtime-bad-memory", { commandName: "review-markdown" }),
-              buildToolEvent("evolver_run_command", "session-command-runtime-bad-memory", { commandName: "review-markdown", prompt: "Review README.md." }),
-            ].join("\n"),
+            stdout: buildToolEvent("evolver_run_command", "session-command-runtime-bad-memory", { commandName: "wrong-command", prompt: "Review README.md." }),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/session-routing|apply only the required session-routing memory/i)
+    ).rejects.toThrow(/did not run review-markdown against README.md/i)
   })
 
-  test("command-runtime scenario rejects runs that do not write session-routing then command-routing", async () => {
+  test("command-runtime scenario rejects runs that do not persist merged session memory state", async () => {
     await writeFile(
       join(repoRoot, "eval/scenarios/command-runtime.md"),
       await readFile(new URL("../../eval/scenarios/command-runtime.md", import.meta.url), "utf8"),
@@ -1970,30 +1920,24 @@ describe("evaluation scenarios", () => {
         scenarioName: "command-runtime",
         timestamp: "2026-04-30T14-30-45.000Z",
         executeCommand: async ({ workspaceRoot }) => {
-          await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
-          await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
           await mkdir(join(workspaceRoot, ".opencode/oc-evolver/sessions"), { recursive: true })
-          await writeFile(join(workspaceRoot, ".opencode/memory/session-routing.md"), ["---", "name: session-routing", "description: Session runtime guidance.", "storage_mode: memory-and-artifact", "---", "", "Prefer session-applied guidance.", ""].join("\n"))
-          await writeFile(join(workspaceRoot, ".opencode/memory/command-routing.md"), ["---", "name: command-routing", "description: Command runtime guidance.", "storage_mode: memory-and-artifact", "---", "", "Prefer command-owned guidance.", ""].join("\n"))
-          await writeFile(join(workspaceRoot, ".opencode/commands/review-markdown.md"), ["---", "description: Review markdown with command-owned runtime metadata", "model: openai/gpt-5.4", "memory:", "  - command-routing", "permission:", "  edit: deny", "---", "", "Review README.md for markdown issues.", ""].join("\n"))
-          await writeFile(join(workspaceRoot, ".opencode/oc-evolver/sessions/session-command-runtime-bad-order.json"), `${JSON.stringify({ memories: { "session-routing": { storageMode: "memory-and-artifact" }, "command-routing": { storageMode: "memory-and-artifact" } }, operatorGuideApplied: true, runtimePolicy: { sourceKind: "command", sourceName: "review-markdown", toolPermissions: { edit: "deny" }, preferredModel: "openai/gpt-5.4" } }, null, 2)}\n`)
-          await writeFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), JSON.stringify({ skills: {}, agents: {}, commands: { "review-markdown": { kind: "command", name: "review-markdown", nativePath: ".opencode/commands/review-markdown.md", revisionID: "rev-command-runtime", contentHash: "d".repeat(64) } }, memories: { "session-routing": { kind: "memory", name: "session-routing", nativePath: ".opencode/memory/session-routing.md", revisionID: "rev-command-runtime", contentHash: "c".repeat(64) }, "command-routing": { kind: "memory", name: "command-routing", nativePath: ".opencode/memory/command-routing.md", revisionID: "rev-command-runtime", contentHash: "e".repeat(64) } }, quarantine: {}, currentRevision: "rev-command-runtime", pendingRevision: null }, null, 2))
-          await writeFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), [JSON.stringify({ action: "write_memory", status: "success" }), JSON.stringify({ action: "write_memory", status: "success" }), JSON.stringify({ action: "apply_memory", status: "success" }), JSON.stringify({ action: "write_command", status: "success" }), JSON.stringify({ action: "run_command", status: "success" })].join("\n") + "\n")
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/sessions/session-command-runtime-bad-session.json"),
+            `${JSON.stringify({ memories: {}, operatorGuideApplied: true, runtimePolicy: { sourceKind: "command", sourceName: "review-markdown", toolPermissions: { edit: "deny" }, preferredModel: "openai/gpt-5.4" } }, null, 2)}\n`,
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            JSON.stringify({ action: "run_command", status: "success" }) + "\n",
+          )
 
           return {
-            stdout: [
-              buildToolEvent("evolver_write_memory", "session-command-runtime-bad-order", { memoryName: "command-routing" }),
-              buildToolEvent("evolver_write_memory", "session-command-runtime-bad-order", { memoryName: "session-routing" }),
-              buildToolEvent("evolver_apply_memory", "session-command-runtime-bad-order", { memoryName: "session-routing" }),
-              buildToolEvent("evolver_write_command", "session-command-runtime-bad-order", { commandName: "review-markdown" }),
-              buildToolEvent("evolver_run_command", "session-command-runtime-bad-order", { commandName: "review-markdown", prompt: "Review README.md." }),
-            ].join("\n"),
+            stdout: buildToolEvent("evolver_run_command", "session-command-runtime-bad-session", { commandName: "review-markdown", prompt: "Review README.md." }),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/write session-routing then command-routing/i)
+    ).rejects.toThrow(/missing persisted command memory state/i)
   })
 
   test("command-runtime scenario rejects runs that omit command-owned metadata from the durable command artifact", async () => {
@@ -2008,24 +1952,23 @@ describe("evaluation scenarios", () => {
         scenarioName: "command-runtime",
         timestamp: "2026-04-30T14-31-00.000Z",
         executeCommand: async ({ workspaceRoot }) => {
-          await mkdir(join(workspaceRoot, ".opencode/memory"), { recursive: true })
           await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
           await mkdir(join(workspaceRoot, ".opencode/oc-evolver/sessions"), { recursive: true })
-          await writeFile(join(workspaceRoot, ".opencode/memory/session-routing.md"), ["---", "name: session-routing", "description: Session runtime guidance.", "storage_mode: memory-and-artifact", "---", "", "Prefer session-applied guidance.", ""].join("\n"))
-          await writeFile(join(workspaceRoot, ".opencode/memory/command-routing.md"), ["---", "name: command-routing", "description: Command runtime guidance.", "storage_mode: memory-and-artifact", "---", "", "Prefer command-owned guidance.", ""].join("\n"))
-          await writeFile(join(workspaceRoot, ".opencode/commands/review-markdown.md"), ["---", "description: Review markdown with missing metadata", "---", "", "Review README.md for markdown issues.", ""].join("\n"))
-          await writeFile(join(workspaceRoot, ".opencode/oc-evolver/sessions/session-command-runtime-bad-doc.json"), `${JSON.stringify({ memories: { "session-routing": { storageMode: "memory-and-artifact" }, "command-routing": { storageMode: "memory-and-artifact" } }, operatorGuideApplied: true, runtimePolicy: { sourceKind: "command", sourceName: "review-markdown", toolPermissions: { edit: "deny" }, preferredModel: "openai/gpt-5.4" } }, null, 2)}\n`)
-          await writeFile(join(workspaceRoot, ".opencode/oc-evolver/registry.json"), JSON.stringify({ skills: {}, agents: {}, commands: { "review-markdown": { kind: "command", name: "review-markdown", nativePath: ".opencode/commands/review-markdown.md", revisionID: "rev-command-runtime", contentHash: "d".repeat(64) } }, memories: { "session-routing": { kind: "memory", name: "session-routing", nativePath: ".opencode/memory/session-routing.md", revisionID: "rev-command-runtime", contentHash: "c".repeat(64) }, "command-routing": { kind: "memory", name: "command-routing", nativePath: ".opencode/memory/command-routing.md", revisionID: "rev-command-runtime", contentHash: "e".repeat(64) } }, quarantine: {}, currentRevision: "rev-command-runtime", pendingRevision: null }, null, 2))
-          await writeFile(join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"), [JSON.stringify({ action: "write_memory", status: "success" }), JSON.stringify({ action: "write_memory", status: "success" }), JSON.stringify({ action: "apply_memory", status: "success" }), JSON.stringify({ action: "write_command", status: "success" }), JSON.stringify({ action: "run_command", status: "success" })].join("\n") + "\n")
+          await writeFile(
+            join(workspaceRoot, ".opencode/commands/review-markdown.md"),
+            ["---", "description: Review markdown with missing metadata", "---", "", 'Respond with exactly "README.md reviewed." and stop.', ""].join("\n"),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/sessions/session-command-runtime-bad-doc.json"),
+            `${JSON.stringify({ memories: { "command-routing": { storageMode: "memory-and-artifact" } }, operatorGuideApplied: true, runtimePolicy: { sourceKind: "command", sourceName: "review-markdown", toolPermissions: { edit: "deny" }, preferredModel: "openai/gpt-5.4" } }, null, 2)}\n`,
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            JSON.stringify({ action: "run_command", status: "success" }) + "\n",
+          )
 
           return {
-            stdout: [
-              buildToolEvent("evolver_write_memory", "session-command-runtime-bad-doc", { memoryName: "session-routing" }),
-              buildToolEvent("evolver_write_memory", "session-command-runtime-bad-doc", { memoryName: "command-routing" }),
-              buildToolEvent("evolver_apply_memory", "session-command-runtime-bad-doc", { memoryName: "session-routing" }),
-              buildToolEvent("evolver_write_command", "session-command-runtime-bad-doc", { commandName: "review-markdown" }),
-              buildToolEvent("evolver_run_command", "session-command-runtime-bad-doc", { commandName: "review-markdown", prompt: "Review README.md." }),
-            ].join("\n"),
+            stdout: buildToolEvent("evolver_run_command", "session-command-runtime-bad-doc", { commandName: "review-markdown", prompt: "Review README.md." }),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -2034,21 +1977,122 @@ describe("evaluation scenarios", () => {
     ).rejects.toThrow(/command document is missing required command-owned metadata|command-owned metadata/i)
   })
 
-  test("revision-lifecycle scenario is part of the default sweep and captures pending-review deletion flow", async () => {
+  test("revision-lifecycle scenario unit coverage captures pending-review deletion flow", async () => {
     await writeFile(
       join(repoRoot, "eval/scenarios/revision-lifecycle.md"),
       await readFile(new URL("../../eval/scenarios/revision-lifecycle.md", import.meta.url), "utf8"),
     )
 
+    let executionCount = 0
+
     const result = await runEvaluationScenario({
       repoRoot,
       scenarioName: "revision-lifecycle",
       timestamp: "2026-04-30T14-31-00.000Z",
-      executeCommand: async ({ workspaceRoot, prompt }) => {
+      executeCommand: async ({ workspaceRoot }) => {
+        executionCount += 1
         await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
         await mkdir(join(workspaceRoot, ".opencode/oc-evolver/revisions"), { recursive: true })
 
-        if (prompt.includes("Turn 1")) {
+        if (executionCount === 1) {
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }) + "\n",
+          )
+
+          return {
+            stdout: buildToolEvent("evolver_write_command", "ses-revision-lifecycle", { commandName: "review-markdown" }),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        }
+
+        if (executionCount === 2) {
+          await writeFile(
+            join(workspaceRoot, ".opencode/commands/review-markdown.md"),
+            ["---", "description: First review flow", "---", "", "Review README.md once.", ""].join("\n"),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify(
+              {
+                skills: {},
+                agents: {},
+                commands: {
+                  "review-markdown": {
+                    kind: "command",
+                    name: "review-markdown",
+                    nativePath: ".opencode/commands/review-markdown.md",
+                    revisionID: "rev-first",
+                    contentHash: "f".repeat(64),
+                  },
+                },
+                memories: {},
+                quarantine: {},
+                currentRevision: "rev-first",
+                pendingRevision: null,
+              },
+              null,
+              2,
+            ),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-first.json"),
+            JSON.stringify({ revisionID: "rev-first" }, null, 2),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            [
+              JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
+              JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
+            ].join("\n") + "\n",
+          )
+
+          return {
+            stdout: buildToolEvent("evolver_promote", "ses-revision-lifecycle", {}),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        }
+
+        if (executionCount === 3) {
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+            JSON.stringify(
+              {
+                skills: {},
+                agents: {},
+                commands: {},
+                memories: {},
+                quarantine: {},
+                currentRevision: "rev-first",
+                pendingRevision: "rev-delete",
+              },
+              null,
+              2,
+            ),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-delete.json"),
+            JSON.stringify({ revisionID: "rev-delete" }, null, 2),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            [
+              JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
+              JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
+              JSON.stringify({ action: "delete_artifact", status: "success", revisionID: "rev-delete", target: "command:review-markdown" }),
+            ].join("\n") + "\n",
+          )
+
+          return {
+            stdout: buildToolEvent("evolver_delete_artifact", "ses-revision-lifecycle", { kind: "command", name: "review-markdown" }),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        }
+
+        if (executionCount === 4) {
           await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/pending-review.json"),
             JSON.stringify(
@@ -2078,31 +2122,6 @@ describe("evaluation scenarios", () => {
             ),
           )
           await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
-            JSON.stringify(
-              {
-                skills: {},
-                agents: {},
-                commands: {},
-                memories: {},
-                quarantine: {},
-                currentRevision: "rev-first",
-                pendingRevision: "rev-delete",
-              },
-              null,
-              2,
-            ),
-          )
-          await writeFile(join(workspaceRoot, ".opencode/commands/review-markdown.md"), "")
-          await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-first.json"),
-            JSON.stringify({ revisionID: "rev-first" }, null, 2),
-          )
-          await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-delete.json"),
-            JSON.stringify({ revisionID: "rev-delete" }, null, 2),
-          )
-          await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
             [
               JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
@@ -2113,171 +2132,27 @@ describe("evaluation scenarios", () => {
           )
 
           return {
-            stdout: [
-              buildToolEvent("evolver_write_command", "ses-revision-lifecycle", { commandName: "review-markdown" }),
-              buildToolEvent("evolver_promote", "ses-revision-lifecycle", {}),
-              buildToolEvent("evolver_delete_artifact", "ses-revision-lifecycle", { kind: "command", name: "review-markdown" }),
-              buildToolEvent(
-                "evolver_review_pending",
-                "ses-revision-lifecycle",
-                {},
-                JSON.stringify({
-                  currentRevisionID: "rev-first",
-                  pendingRevisionID: "rev-delete",
-                  changedArtifacts: {
-                    skills: [],
-                    agents: [],
-                    commands: ["review-markdown"],
-                    memories: [],
-                  },
-                }),
-              ),
-            ].join("\n"),
+            stdout: buildToolEvent(
+              "evolver_review_pending",
+              "ses-revision-lifecycle",
+              {},
+              JSON.stringify({
+                currentRevisionID: "rev-first",
+                pendingRevisionID: "rev-delete",
+                changedArtifacts: {
+                  skills: [],
+                  agents: [],
+                  commands: ["review-markdown"],
+                  memories: [],
+                },
+              }),
+            ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
         }
 
-        await writeFile(
-          join(workspaceRoot, ".opencode/commands/review-markdown.md"),
-          ["---", "description: First review flow", "---", "", "Review README.md once.", ""].join("\n"),
-        )
-        await writeFile(
-          join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
-          JSON.stringify(
-            {
-              skills: {},
-              agents: {},
-              commands: {
-                "review-markdown": {
-                  kind: "command",
-                  name: "review-markdown",
-                  nativePath: ".opencode/commands/review-markdown.md",
-                  revisionID: "rev-first",
-                  contentHash: "f".repeat(64),
-                },
-              },
-              memories: {},
-              quarantine: {},
-              currentRevision: "rev-first",
-              pendingRevision: null,
-            },
-            null,
-            2,
-          ),
-        )
-        await rm(join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-delete.json"), { force: true })
-        await writeFile(
-          join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-          [
-          JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
-          JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
-          JSON.stringify({ action: "delete_artifact", status: "success", revisionID: "rev-delete", target: "command:review-markdown" }),
-          JSON.stringify({ action: "review_pending", status: "success", target: ".opencode/oc-evolver/pending-review.json" }),
-          JSON.stringify({ action: "reject", status: "success", revisionID: "rev-first", rejectedRevisionID: "rev-delete" }),
-          JSON.stringify({ action: "prune", status: "success", target: ".opencode/oc-evolver/revisions", detail: "pruned 1 obsolete revisions" }),
-        ].join("\n") + "\n",
-        )
-
-        return {
-          stdout: [
-            buildToolEvent("evolver_reject", "ses-revision-lifecycle", {}),
-            buildToolEvent("evolver_prune", "ses-revision-lifecycle", {}),
-          ].join("\n"),
-          stderr: "",
-          exitCode: 0,
-        } satisfies EvalCommandResult
-      },
-    })
-
-    const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
-      changedFiles: string[]
-    }
-
-    expect(DEFAULT_SCENARIOS).toContain("revision-lifecycle")
-    expect(resultJson.changedFiles).toContain(".opencode/commands/review-markdown.md")
-    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/registry.json")
-    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/audit.ndjson")
-    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/pending-review.json")
-  })
-
-  test("revision-lifecycle scenario rejects runs that leave an obsolete revision snapshot behind", async () => {
-    await writeFile(
-      join(repoRoot, "eval/scenarios/revision-lifecycle.md"),
-      await readFile(new URL("../../eval/scenarios/revision-lifecycle.md", import.meta.url), "utf8"),
-    )
-
-    await expect(
-      runEvaluationScenario({
-        repoRoot,
-        scenarioName: "revision-lifecycle",
-        timestamp: "2026-04-30T14-31-30.000Z",
-        executeCommand: async ({ workspaceRoot, prompt }) => {
-          await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
-          await mkdir(join(workspaceRoot, ".opencode/oc-evolver/revisions"), { recursive: true })
-
-          if (prompt.includes("Turn 1")) {
-            await writeFile(join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-first.json"), JSON.stringify({ revisionID: "rev-first" }, null, 2))
-            await writeFile(
-              join(workspaceRoot, ".opencode/oc-evolver/pending-review.json"),
-              JSON.stringify(
-                {
-                  currentRevisionID: "rev-first",
-                  pendingRevisionID: "rev-delete",
-                  changedArtifacts: { skills: [], agents: [], commands: ["review-markdown"], memories: [] },
-                },
-                null,
-                2,
-              ),
-            )
-            await writeFile(
-              join(workspaceRoot, ".opencode/oc-evolver/pending-review-snapshot.json"),
-              JSON.stringify(
-                {
-                  pendingRevisionID: "rev-delete",
-                  snapshotPath: ".opencode/oc-evolver/revisions/rev-delete.json",
-                },
-                null,
-                2,
-              ),
-            )
-            await writeFile(
-              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
-              JSON.stringify({ skills: {}, agents: {}, commands: {}, memories: {}, quarantine: {}, currentRevision: "rev-first", pendingRevision: "rev-delete" }, null, 2),
-            )
-            await writeFile(join(workspaceRoot, ".opencode/commands/review-markdown.md"), "")
-            await writeFile(join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-delete.json"), JSON.stringify({ revisionID: "rev-delete" }, null, 2))
-            await writeFile(
-              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-              [
-                JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
-                JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
-                JSON.stringify({ action: "delete_artifact", status: "success", revisionID: "rev-delete", target: "command:review-markdown" }),
-                JSON.stringify({ action: "review_pending", status: "success", target: ".opencode/oc-evolver/pending-review.json" }),
-              ].join("\n") + "\n",
-            )
-
-            return {
-              stdout: [
-                buildToolEvent("evolver_write_command", "ses-revision-lifecycle-bad", { commandName: "review-markdown" }),
-                buildToolEvent("evolver_promote", "ses-revision-lifecycle-bad", {}),
-                buildToolEvent("evolver_delete_artifact", "ses-revision-lifecycle-bad", { kind: "command", name: "review-markdown" }),
-                buildToolEvent(
-                  "evolver_review_pending",
-                  "ses-revision-lifecycle-bad",
-                  {},
-                  JSON.stringify({
-                    currentRevisionID: "rev-first",
-                    pendingRevisionID: "rev-delete",
-                    changedArtifacts: { skills: [], agents: [], commands: ["review-markdown"], memories: [] },
-                  }),
-                ),
-              ].join("\n"),
-              stderr: "",
-              exitCode: 0,
-            } satisfies EvalCommandResult
-          }
-
+        if (executionCount === 5) {
           await writeFile(
             join(workspaceRoot, ".opencode/commands/review-markdown.md"),
             ["---", "description: First review flow", "---", "", "Review README.md once.", ""].join("\n"),
@@ -2314,15 +2189,275 @@ describe("evaluation scenarios", () => {
               JSON.stringify({ action: "delete_artifact", status: "success", revisionID: "rev-delete", target: "command:review-markdown" }),
               JSON.stringify({ action: "review_pending", status: "success", target: ".opencode/oc-evolver/pending-review.json" }),
               JSON.stringify({ action: "reject", status: "success", revisionID: "rev-first", rejectedRevisionID: "rev-delete" }),
+            ].join("\n") + "\n",
+          )
+
+          return {
+            stdout: buildToolEvent("evolver_reject", "ses-revision-lifecycle", {}),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        }
+
+        await rm(join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-delete.json"), { force: true })
+        await writeFile(
+          join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+          [
+            JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
+            JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
+            JSON.stringify({ action: "delete_artifact", status: "success", revisionID: "rev-delete", target: "command:review-markdown" }),
+            JSON.stringify({ action: "review_pending", status: "success", target: ".opencode/oc-evolver/pending-review.json" }),
+            JSON.stringify({ action: "reject", status: "success", revisionID: "rev-first", rejectedRevisionID: "rev-delete" }),
+            JSON.stringify({ action: "prune", status: "success", target: ".opencode/oc-evolver/revisions", detail: "pruned 1 obsolete revisions" }),
+          ].join("\n") + "\n",
+        )
+
+        return {
+          stdout: buildToolEvent("evolver_prune", "ses-revision-lifecycle", {}),
+          stderr: "",
+          exitCode: 0,
+        } satisfies EvalCommandResult
+      },
+    })
+
+    const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
+      changedFiles: string[]
+    }
+
+    expect(evalHarness.FULL_SCENARIOS).not.toContain("revision-lifecycle")
+    expect(resultJson.changedFiles).toContain(".opencode/commands/review-markdown.md")
+    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/registry.json")
+    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/audit.ndjson")
+    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/pending-review.json")
+  })
+
+  test("revision-lifecycle scenario rejects runs that leave an obsolete revision snapshot behind", async () => {
+    await writeFile(
+      join(repoRoot, "eval/scenarios/revision-lifecycle.md"),
+      await readFile(new URL("../../eval/scenarios/revision-lifecycle.md", import.meta.url), "utf8"),
+    )
+
+    let executionCount = 0
+
+    await expect(
+      runEvaluationScenario({
+        repoRoot,
+        scenarioName: "revision-lifecycle",
+        timestamp: "2026-04-30T14-31-30.000Z",
+        executeCommand: async ({ workspaceRoot }) => {
+          executionCount += 1
+          await mkdir(join(workspaceRoot, ".opencode/commands"), { recursive: true })
+          await mkdir(join(workspaceRoot, ".opencode/oc-evolver/revisions"), { recursive: true })
+
+          if (executionCount === 1) {
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }) + "\n",
+            )
+
+            return {
+              stdout: buildToolEvent("evolver_write_command", "ses-revision-lifecycle-bad", { commandName: "review-markdown" }),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          if (executionCount === 2) {
+            await writeFile(
+              join(workspaceRoot, ".opencode/commands/review-markdown.md"),
+              ["---", "description: First review flow", "---", "", "Review README.md once.", ""].join("\n"),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {
+                    "review-markdown": {
+                      kind: "command",
+                      name: "review-markdown",
+                      nativePath: ".opencode/commands/review-markdown.md",
+                      revisionID: "rev-first",
+                      contentHash: "f".repeat(64),
+                    },
+                  },
+                  memories: {},
+                  quarantine: {},
+                  currentRevision: "rev-first",
+                  pendingRevision: null,
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-first.json"),
+              JSON.stringify({ revisionID: "rev-first" }, null, 2),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              [
+                JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
+                JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
+              ].join("\n") + "\n",
+            )
+
+            return {
+              stdout: buildToolEvent("evolver_promote", "ses-revision-lifecycle-bad", {}),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          if (executionCount === 3) {
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {},
+                  memories: {},
+                  quarantine: {},
+                  currentRevision: "rev-first",
+                  pendingRevision: "rev-delete",
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/revisions/rev-delete.json"),
+              JSON.stringify({ revisionID: "rev-delete" }, null, 2),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              [
+                JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
+                JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
+                JSON.stringify({ action: "delete_artifact", status: "success", revisionID: "rev-delete", target: "command:review-markdown" }),
+              ].join("\n") + "\n",
+            )
+
+            return {
+              stdout: buildToolEvent("evolver_delete_artifact", "ses-revision-lifecycle-bad", { kind: "command", name: "review-markdown" }),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          if (executionCount === 4) {
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/pending-review.json"),
+              JSON.stringify(
+                {
+                  currentRevisionID: "rev-first",
+                  pendingRevisionID: "rev-delete",
+                  changedArtifacts: { skills: [], agents: [], commands: ["review-markdown"], memories: [] },
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/pending-review-snapshot.json"),
+              JSON.stringify(
+                {
+                  pendingRevisionID: "rev-delete",
+                  snapshotPath: ".opencode/oc-evolver/revisions/rev-delete.json",
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              [
+                JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
+                JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
+                JSON.stringify({ action: "delete_artifact", status: "success", revisionID: "rev-delete", target: "command:review-markdown" }),
+                JSON.stringify({ action: "review_pending", status: "success", target: ".opencode/oc-evolver/pending-review.json" }),
+              ].join("\n") + "\n",
+            )
+
+            return {
+              stdout: buildToolEvent(
+                "evolver_review_pending",
+                "ses-revision-lifecycle-bad",
+                {},
+                JSON.stringify({
+                  currentRevisionID: "rev-first",
+                  pendingRevisionID: "rev-delete",
+                  changedArtifacts: { skills: [], agents: [], commands: ["review-markdown"], memories: [] },
+                }),
+              ),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          if (executionCount === 5) {
+            await writeFile(
+              join(workspaceRoot, ".opencode/commands/review-markdown.md"),
+              ["---", "description: First review flow", "---", "", "Review README.md once.", ""].join("\n"),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/registry.json"),
+              JSON.stringify(
+                {
+                  skills: {},
+                  agents: {},
+                  commands: {
+                    "review-markdown": {
+                      kind: "command",
+                      name: "review-markdown",
+                      nativePath: ".opencode/commands/review-markdown.md",
+                      revisionID: "rev-first",
+                      contentHash: "f".repeat(64),
+                    },
+                  },
+                  memories: {},
+                  quarantine: {},
+                  currentRevision: "rev-first",
+                  pendingRevision: null,
+                },
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              [
+                JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
+                JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
+                JSON.stringify({ action: "delete_artifact", status: "success", revisionID: "rev-delete", target: "command:review-markdown" }),
+                JSON.stringify({ action: "review_pending", status: "success", target: ".opencode/oc-evolver/pending-review.json" }),
+                JSON.stringify({ action: "reject", status: "success", revisionID: "rev-first", rejectedRevisionID: "rev-delete" }),
+              ].join("\n") + "\n",
+            )
+
+            return {
+              stdout: buildToolEvent("evolver_reject", "ses-revision-lifecycle-bad", {}),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            [
+              JSON.stringify({ action: "write_command", status: "success", revisionID: "rev-first" }),
+              JSON.stringify({ action: "promote", status: "success", revisionID: "rev-first" }),
+              JSON.stringify({ action: "delete_artifact", status: "success", revisionID: "rev-delete", target: "command:review-markdown" }),
+              JSON.stringify({ action: "review_pending", status: "success", target: ".opencode/oc-evolver/pending-review.json" }),
+              JSON.stringify({ action: "reject", status: "success", revisionID: "rev-first", rejectedRevisionID: "rev-delete" }),
               JSON.stringify({ action: "prune", status: "success", target: ".opencode/oc-evolver/revisions", detail: "pruned 1 obsolete revisions" }),
             ].join("\n") + "\n",
           )
 
           return {
-            stdout: [
-              buildToolEvent("evolver_reject", "ses-revision-lifecycle-bad", {}),
-              buildToolEvent("evolver_prune", "ses-revision-lifecycle-bad", {}),
-            ].join("\n"),
+            stdout: buildToolEvent("evolver_prune", "ses-revision-lifecycle-bad", {}),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -2349,26 +2484,12 @@ describe("evaluation scenarios", () => {
         if (executionCount === 1) {
           await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
           await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop-paused.json"),
-            JSON.stringify(
-              {
-                config: {
-                  enabled: true,
-                  paused: true,
-                  intervalMs: 60_000,
-                },
-              },
-              null,
-              2,
-            ),
-          )
-          await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
             JSON.stringify(
               {
                 config: {
                   enabled: true,
-                  paused: true,
+                  paused: false,
                   intervalMs: 60_000,
                   verificationCommands: [["bun", "run", "typecheck"]],
                   evaluationScenarios: ["autonomous-run"],
@@ -2387,80 +2508,162 @@ describe("evaluation scenarios", () => {
               2,
             ),
           )
+          return {
+            stdout: buildToolEvent("evolver_autonomous_configure", "ses-autonomous-control", {
+              enabled: true,
+              paused: false,
+              intervalMs: 60_000,
+              verificationCommands: [["bun", "run", "typecheck"]],
+              evaluationScenarios: ["autonomous-run"],
+              failurePolicy: {
+                maxConsecutiveFailures: 3,
+                escalationAction: "pause_loop",
+              },
+              objectives: [],
+              replaceObjectives: true,
+            }),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        }
+
+        if (executionCount === 2) {
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+            JSON.stringify(
+              {
+                config: {
+                  enabled: true,
+                  paused: true,
+                  intervalMs: 60_000,
+                  verificationCommands: [["bun", "run", "typecheck"]],
+                  evaluationScenarios: ["autonomous-run"],
+                  failurePolicy: {
+                    maxConsecutiveFailures: 3,
+                    escalationAction: "pause_loop",
+                    lastEscalationReason: null,
+                  },
+                },
+                lastSessionID: null,
+                latestLearning: {
+                  summary: "The last autonomous iteration was skipped_unrunnable: no bounded objective available",
+                  remainingObjectives: [],
+                  lastDecision: "skipped_unrunnable",
+                  rejectionReason: "no bounded objective available",
+                  failedVerificationCommands: [],
+                  failedEvaluationScenarios: [],
+                  changedArtifacts: [],
+                },
+                objectives: [],
+                iterations: [
+                  {
+                    startedAt: "2026-04-30T14:32:05.000Z",
+                    completedAt: "2026-04-30T14:32:05.000Z",
+                    sessionID: null,
+                    decision: "skipped_unrunnable",
+                    pendingRevisionID: null,
+                    promotedRevisionID: null,
+                    rejectionReason: "no bounded objective available",
+                    prompt:
+                      "Review the current project state, consult autonomous-loop status and prior learning, make one concrete improvement, and leave the workspace in a verified state.",
+                    objectivePrompt: null,
+                    verification: [],
+                    evaluations: [],
+                    changedArtifacts: [],
+                  },
+                ],
+              },
+              null,
+              2,
+            ),
+          )
           await writeFile(
             join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
             JSON.stringify({ action: "autonomous_pause", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }) + "\n",
           )
 
           return {
-            stdout: [
-              buildToolEvent("evolver_autonomous_configure", "ses-autonomous-control", {
-                enabled: true,
-                paused: false,
-                intervalMs: 60_000,
-                verificationCommands: [["bun", "run", "typecheck"]],
-                evaluationScenarios: ["autonomous-run"],
-                failurePolicy: {
-                  maxConsecutiveFailures: 3,
-                  escalationAction: "pause_loop",
+            stdout: buildToolEvent(
+              "evolver_autonomous_pause",
+              "ses-autonomous-control",
+              {},
+              JSON.stringify({
+                config: {
+                  enabled: true,
+                  paused: true,
+                  intervalMs: 60_000,
                 },
-                objectives: [],
-                replaceObjectives: true,
+                latestLearning: {
+                  lastDecision: "skipped_unrunnable",
+                  rejectionReason: "no bounded objective available",
+                },
               }),
-              buildToolEvent(
-                "evolver_autonomous_pause",
-                "ses-autonomous-control",
-                {},
-                JSON.stringify({
-                  config: {
-                    enabled: true,
-                    paused: true,
-                    intervalMs: 60_000,
-                  },
-                }),
-              ),
-            ].join("\n"),
+            ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
         }
 
-        await writeFile(
-          join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
-          JSON.stringify(
-            {
-              config: {
-                enabled: true,
-                paused: false,
-                intervalMs: 60_000,
-                verificationCommands: [["bun", "run", "typecheck"]],
-                evaluationScenarios: ["autonomous-run"],
-                failurePolicy: {
-                  maxConsecutiveFailures: 3,
-                  escalationAction: "pause_loop",
-                  lastEscalationReason: null,
+        if (executionCount === 3) {
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+            JSON.stringify(
+              {
+                config: {
+                  enabled: true,
+                  paused: false,
+                  intervalMs: 60_000,
+                  verificationCommands: [["bun", "run", "typecheck"]],
+                  evaluationScenarios: ["autonomous-run"],
+                  failurePolicy: {
+                    maxConsecutiveFailures: 3,
+                    escalationAction: "pause_loop",
+                    lastEscalationReason: null,
+                  },
                 },
+                lastSessionID: null,
+                latestLearning: {
+                  summary: "The last autonomous iteration was skipped_unrunnable: no bounded objective available",
+                  remainingObjectives: [],
+                  lastDecision: "skipped_unrunnable",
+                  rejectionReason: "no bounded objective available",
+                  failedVerificationCommands: [],
+                  failedEvaluationScenarios: [],
+                  changedArtifacts: [],
+                },
+                objectives: [],
+                iterations: [
+                  {
+                    startedAt: "2026-04-30T14:32:05.000Z",
+                    completedAt: "2026-04-30T14:32:05.000Z",
+                    sessionID: null,
+                    decision: "skipped_unrunnable",
+                    pendingRevisionID: null,
+                    promotedRevisionID: null,
+                    rejectionReason: "no bounded objective available",
+                    prompt:
+                      "Review the current project state, consult autonomous-loop status and prior learning, make one concrete improvement, and leave the workspace in a verified state.",
+                    objectivePrompt: null,
+                    verification: [],
+                    evaluations: [],
+                    changedArtifacts: [],
+                  },
+                ],
               },
-              lastSessionID: null,
-              latestLearning: null,
-              objectives: [],
-              iterations: [],
-            },
-            null,
-            2,
-          ),
-        )
-        await writeFile(
-          join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-          [
-            JSON.stringify({ action: "autonomous_pause", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }),
-            JSON.stringify({ action: "autonomous_resume", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }),
-          ].join("\n") + "\n",
-        )
+              null,
+              2,
+            ),
+          )
+          await writeFile(
+            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+            [
+              JSON.stringify({ action: "autonomous_pause", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }),
+              JSON.stringify({ action: "autonomous_resume", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }),
+            ].join("\n") + "\n",
+          )
 
-        return {
-          stdout: [
-            buildToolEvent(
+          return {
+            stdout: buildToolEvent(
               "evolver_autonomous_resume",
               "ses-autonomous-control",
               {},
@@ -2473,23 +2676,48 @@ describe("evaluation scenarios", () => {
                 activation: {
                   mode: "worker",
                 },
-              }),
-            ),
-            buildToolEvent(
-              "evolver_autonomous_status",
-              "ses-autonomous-control",
-              {},
-              JSON.stringify({
-                config: {
-                  enabled: true,
-                  paused: false,
-                  intervalMs: 60_000,
-                  verificationCommands: [["bun", "run", "typecheck"]],
-                  evaluationScenarios: ["autonomous-run"],
+                latestLearning: {
+                  lastDecision: "skipped_unrunnable",
+                  rejectionReason: "no bounded objective available",
                 },
               }),
             ),
-          ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
+        }
+
+        return {
+          stdout: buildToolEvent(
+            "evolver_autonomous_status",
+            "ses-autonomous-control",
+            {},
+            JSON.stringify({
+              config: {
+                enabled: true,
+                paused: false,
+                intervalMs: 60_000,
+                verificationCommands: [["bun", "run", "typecheck"]],
+                evaluationScenarios: ["autonomous-run"],
+              },
+              latestLearning: {
+                lastDecision: "skipped_unrunnable",
+                rejectionReason: "no bounded objective available",
+              },
+              iterations: [
+                {
+                  decision: "skipped_unrunnable",
+                  rejectionReason: "no bounded objective available",
+                  changedArtifacts: [],
+                },
+                {
+                  decision: "skipped_unrunnable",
+                  rejectionReason: "no bounded objective available",
+                  changedArtifacts: [],
+                },
+              ],
+            }),
+          ),
           stderr: "",
           exitCode: 0,
         } satisfies EvalCommandResult
@@ -2502,12 +2730,12 @@ describe("evaluation scenarios", () => {
     }
 
     expect(DEFAULT_SCENARIOS).toContain("autonomous-control")
-    expect(resultJson.turnCount).toBe(2)
+    expect(resultJson.turnCount).toBe(4)
     expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/autonomous-loop.json")
-    expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/autonomous-loop-paused.json")
+    expect(resultJson.changedFiles).not.toContain(".opencode/oc-evolver/autonomous-loop-paused.json")
   })
 
-  test("autonomous-control scenario rejects runs that skip durable paused-state evidence", async () => {
+  test("autonomous-control scenario rejects runs whose pause output does not reflect the paused configured state", async () => {
     await writeFile(
       join(repoRoot, "eval/scenarios/autonomous-control.md"),
       await readFile(new URL("../../eval/scenarios/autonomous-control.md", import.meta.url), "utf8"),
@@ -2525,6 +2753,51 @@ describe("evaluation scenarios", () => {
           await mkdir(join(workspaceRoot, ".opencode/oc-evolver"), { recursive: true })
 
           if (executionCount === 1) {
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+              JSON.stringify(
+                {
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 60_000,
+                    verificationCommands: [["bun", "run", "typecheck"]],
+                    evaluationScenarios: ["autonomous-run"],
+                    failurePolicy: {
+                      maxConsecutiveFailures: 3,
+                      escalationAction: "pause_loop",
+                      lastEscalationReason: null,
+                    },
+                  },
+                  lastSessionID: null,
+                  latestLearning: null,
+                  objectives: [],
+                  iterations: [],
+                },
+                null,
+                2,
+              ),
+            )
+            return {
+              stdout: buildToolEvent("evolver_autonomous_configure", "ses-autonomous-control-bad", {
+                enabled: true,
+                paused: false,
+                intervalMs: 60_000,
+                verificationCommands: [["bun", "run", "typecheck"]],
+                evaluationScenarios: ["autonomous-run"],
+                failurePolicy: {
+                  maxConsecutiveFailures: 3,
+                  escalationAction: "pause_loop",
+                },
+                objectives: [],
+                replaceObjectives: true,
+              }),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          if (executionCount === 2) {
             await writeFile(
               join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
               JSON.stringify(
@@ -2556,74 +2829,59 @@ describe("evaluation scenarios", () => {
             )
 
             return {
-              stdout: [
-                buildToolEvent("evolver_autonomous_configure", "ses-autonomous-control-bad", {
-                  enabled: true,
-                  paused: false,
-                  intervalMs: 60_000,
-                  verificationCommands: [["bun", "run", "typecheck"]],
-                  evaluationScenarios: ["autonomous-run"],
-                  failurePolicy: {
-                    maxConsecutiveFailures: 3,
-                    escalationAction: "pause_loop",
+              stdout: buildToolEvent(
+                "evolver_autonomous_pause",
+                "ses-autonomous-control-bad",
+                {},
+                JSON.stringify({
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 60_000,
                   },
-                  objectives: [],
-                  replaceObjectives: true,
                 }),
-                buildToolEvent(
-                  "evolver_autonomous_pause",
-                  "ses-autonomous-control-bad",
-                  {},
-                  JSON.stringify({
-                    config: {
-                      enabled: true,
-                      paused: false,
-                      intervalMs: 60_000,
-                    },
-                  }),
-                ),
-              ].join("\n"),
+              ),
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
           }
 
-          await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
-            JSON.stringify(
-              {
-                config: {
-                  enabled: true,
-                  paused: false,
-                  intervalMs: 60_000,
-                  verificationCommands: [["bun", "run", "typecheck"]],
-                  evaluationScenarios: ["autonomous-run"],
-                  failurePolicy: {
-                    maxConsecutiveFailures: 3,
-                    escalationAction: "pause_loop",
-                    lastEscalationReason: null,
+          if (executionCount === 3) {
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"),
+              JSON.stringify(
+                {
+                  config: {
+                    enabled: true,
+                    paused: false,
+                    intervalMs: 60_000,
+                    verificationCommands: [["bun", "run", "typecheck"]],
+                    evaluationScenarios: ["autonomous-run"],
+                    failurePolicy: {
+                      maxConsecutiveFailures: 3,
+                      escalationAction: "pause_loop",
+                      lastEscalationReason: null,
+                    },
                   },
+                  lastSessionID: null,
+                  latestLearning: null,
+                  objectives: [],
+                  iterations: [],
                 },
-                lastSessionID: null,
-                latestLearning: null,
-                objectives: [],
-                iterations: [],
-              },
-              null,
-              2,
-            ),
-          )
-          await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-            [
-              JSON.stringify({ action: "autonomous_pause", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }),
-              JSON.stringify({ action: "autonomous_resume", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }),
-            ].join("\n") + "\n",
-          )
+                null,
+                2,
+              ),
+            )
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              [
+                JSON.stringify({ action: "autonomous_pause", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }),
+                JSON.stringify({ action: "autonomous_resume", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }),
+              ].join("\n") + "\n",
+            )
 
-          return {
-            stdout: [
-              buildToolEvent(
+            return {
+              stdout: buildToolEvent(
                 "evolver_autonomous_resume",
                 "ses-autonomous-control-bad",
                 {},
@@ -2638,27 +2896,32 @@ describe("evaluation scenarios", () => {
                   },
                 }),
               ),
-              buildToolEvent(
-                "evolver_autonomous_status",
-                "ses-autonomous-control-bad",
-                {},
-                JSON.stringify({
-                  config: {
-                    enabled: true,
-                    paused: false,
-                    intervalMs: 60_000,
-                    verificationCommands: [["bun", "run", "typecheck"]],
-                    evaluationScenarios: ["autonomous-run"],
-                  },
-                }),
-              ),
-            ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: buildToolEvent(
+              "evolver_autonomous_status",
+              "ses-autonomous-control-bad",
+              {},
+              JSON.stringify({
+                config: {
+                  enabled: true,
+                  paused: false,
+                  intervalMs: 60_000,
+                  verificationCommands: [["bun", "run", "typecheck"]],
+                  evaluationScenarios: ["autonomous-run"],
+                },
+              }),
+            ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
         },
       }),
-    ).rejects.toThrow(/paused-state evidence|paused/i)
+    ).rejects.toThrow(/paused configured state|paused/i)
   })
 
   test("autonomous-startup scenario is part of the default sweep and captures startup restoration evidence", async () => {
@@ -2669,42 +2932,84 @@ describe("evaluation scenarios", () => {
 
     const activationCalls: Array<Record<string, unknown>> = []
     let scenarioWorkspaceRoot = ""
+    let executionCount = 0
 
     const result = await runEvaluationScenario({
       repoRoot,
       scenarioName: "autonomous-startup",
       timestamp: "2026-04-30T14-33-00.000Z",
       executeCommand: async ({ workspaceRoot }) => {
+        executionCount += 1
         scenarioWorkspaceRoot = workspaceRoot
-        const seededLoopState = JSON.parse(
-          await readFile(join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"), "utf8"),
-        ) as {
-          config?: {
-            enabled?: boolean
-            paused?: boolean
-            intervalMs?: number
+
+        if (executionCount === 1) {
+          const seededLoopState = JSON.parse(
+            await readFile(join(workspaceRoot, ".opencode/oc-evolver/autonomous-loop.json"), "utf8"),
+          ) as {
+            config?: {
+              enabled?: boolean
+              paused?: boolean
+              intervalMs?: number
+            }
           }
+
+          expect(seededLoopState.config).toMatchObject({
+            enabled: true,
+            paused: false,
+            intervalMs: 60_000,
+          })
+
+          const hooks = await (createOCEvolverPlugin as any)(undefined, {
+            activateAutonomousLoop: async (input: Record<string, unknown>) =>
+              activateAutonomousLoop(input as any, {
+                startWorker: (config: Record<string, unknown>) => {
+                  activationCalls.push(config)
+
+                  return {
+                    once() {},
+                    terminate: async () => 0,
+                  } as never
+                },
+              }),
+          })({
+            client: {
+              session: {
+                prompt: async () => ({ info: {}, parts: [] }),
+              },
+            },
+            project: {
+              id: "eval-startup-project",
+              worktree: workspaceRoot,
+            },
+            directory: workspaceRoot,
+            worktree: workspaceRoot,
+            experimental_workspace: {
+              register() {},
+            },
+            serverUrl: new URL("http://localhost:4096"),
+            $: {} as never,
+          } as never)
+
+          await hooks.config?.({} as never)
+
+          const autonomousStatusOutput = await hooks.tool.evolver_autonomous_status.execute(
+            {},
+            { sessionID: "ses-autonomous-startup" } as never,
+          )
+
+          return {
+            stdout: buildToolEvent(
+              "evolver_autonomous_status",
+              "ses-autonomous-startup",
+              {},
+              autonomousStatusOutput,
+            ),
+            stderr: "",
+            exitCode: 0,
+          } satisfies EvalCommandResult
         }
 
-        expect(seededLoopState.config).toMatchObject({
-          enabled: true,
-          paused: false,
-          intervalMs: 60_000,
-        })
-
-        const hooks = await (createOCEvolverPlugin as any)(undefined, {
-          activateAutonomousLoop: async (input: Record<string, unknown>) =>
-            activateAutonomousLoop(input as any, {
-              startWorker: (config: Record<string, unknown>) => {
-                activationCalls.push(config)
-
-                return {
-                  once() {},
-                  terminate: async () => 0,
-                } as never
-              },
-            }),
-        })({
+        const hooks = await createOCEvolverPlugin(undefined, {})({
           client: {
             session: {
               prompt: async () => ({ info: {}, parts: [] }),
@@ -2723,21 +3028,14 @@ describe("evaluation scenarios", () => {
           $: {} as never,
         } as never)
 
-        await hooks.config?.({} as never)
-
-        const autonomousStatusOutput = await hooks.tool.evolver_autonomous_status.execute({}, { sessionID: "ses-autonomous-startup" } as never)
-        const registryStatusOutput = await hooks.tool.evolver_status.execute({}, { sessionID: "ses-autonomous-startup" } as never)
+        const tool = hooks.tool!
+        const registryStatusOutput = await tool.evolver_status!.execute(
+          {},
+          { sessionID: "ses-autonomous-startup" } as never,
+        )
 
         return {
-          stdout: [
-            buildToolEvent(
-              "evolver_autonomous_status",
-              "ses-autonomous-startup",
-              {},
-              autonomousStatusOutput,
-            ),
-            buildToolEvent("evolver_status", "ses-autonomous-startup", {}, registryStatusOutput),
-          ].join("\n"),
+          stdout: buildToolEvent("evolver_status", "ses-autonomous-startup", {}, registryStatusOutput),
           stderr: "",
           exitCode: 0,
         } satisfies EvalCommandResult
@@ -2746,8 +3044,10 @@ describe("evaluation scenarios", () => {
 
     const resultJson = JSON.parse(await readFile(join(result.resultDir, "result.json"), "utf8")) as {
       changedFiles: string[]
+      turnCount: number
     }
 
+    expect(resultJson.turnCount).toBe(2)
     expect(DEFAULT_SCENARIOS).toContain("autonomous-startup")
     expect(activationCalls).toHaveLength(1)
     expect(activationCalls[0]).toMatchObject({
@@ -2769,40 +3069,24 @@ describe("evaluation scenarios", () => {
     await expect(
       runEvaluationScenario({
         repoRoot,
-      scenarioName: "autonomous-startup",
-      timestamp: "2026-04-30T14-33-30.000Z",
-      executeCommand: async ({ workspaceRoot }) => {
+        scenarioName: "autonomous-startup",
+        timestamp: "2026-04-30T14-33-30.000Z",
+        executeCommand: async () => {
           return {
-            stdout: [
-              buildToolEvent(
-                "evolver_autonomous_status",
-                "ses-autonomous-startup-bad",
-                {},
-                JSON.stringify({
-                  config: {
-                    enabled: true,
-                    paused: false,
-                    intervalMs: 60_000,
-                    verificationCommands: [["bun", "run", "typecheck"]],
-                    evaluationScenarios: ["autonomous-run"],
-                  },
-                }),
-              ),
-              buildToolEvent(
-                "evolver_status",
-                "ses-autonomous-startup-bad",
-                {},
-                JSON.stringify({
-                  skills: {},
-                  agents: {},
-                  commands: {},
-                  memories: {},
-                  quarantine: {},
-                  currentRevision: null,
-                  pendingRevision: null,
-                }),
-              ),
-            ].join("\n"),
+            stdout: buildToolEvent(
+              "evolver_autonomous_status",
+              "ses-autonomous-startup-bad",
+              {},
+              JSON.stringify({
+                config: {
+                  enabled: true,
+                  paused: false,
+                  intervalMs: 60_000,
+                  verificationCommands: [["bun", "run", "typecheck"]],
+                  evaluationScenarios: ["autonomous-run"],
+                },
+              }),
+            ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -2817,20 +3101,24 @@ describe("evaluation scenarios", () => {
       await readFile(new URL("../../eval/scenarios/autonomous-startup.md", import.meta.url), "utf8"),
     )
 
+    let executionCount = 0
+
     await expect(
       runEvaluationScenario({
         repoRoot,
         scenarioName: "autonomous-startup",
         timestamp: "2026-04-30T14-34-00.000Z",
         executeCommand: async ({ workspaceRoot }) => {
-          await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-            JSON.stringify({ action: "autonomous_restore", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }) + "\n",
-          )
+          executionCount += 1
 
-          return {
-            stdout: [
-              buildToolEvent(
+          if (executionCount === 1) {
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              JSON.stringify({ action: "autonomous_restore", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }) + "\n",
+            )
+
+            return {
+              stdout: buildToolEvent(
                 "evolver_autonomous_status",
                 "ses-autonomous-startup-stale",
                 {},
@@ -2844,21 +3132,26 @@ describe("evaluation scenarios", () => {
                   },
                 }),
               ),
-              buildToolEvent(
-                "evolver_status",
-                "ses-autonomous-startup-stale",
-                {},
-                JSON.stringify({
-                  skills: {},
-                  agents: {},
-                  commands: {},
-                  memories: {},
-                  quarantine: {},
-                  currentRevision: null,
-                  pendingRevision: "rev-pending-startup",
-                }),
-              ),
-            ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: buildToolEvent(
+              "evolver_status",
+              "ses-autonomous-startup-stale",
+              {},
+              JSON.stringify({
+                skills: {},
+                agents: {},
+                commands: {},
+                memories: {},
+                quarantine: {},
+                currentRevision: null,
+                pendingRevision: "rev-pending-startup",
+              }),
+            ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -2989,18 +3282,15 @@ describe("evaluation scenarios", () => {
             )
 
             return {
-              stdout: [
-                buildToolEvent("evolver_autonomous_configure", "ses-auto-status-stale", AUTONOMOUS_RUN_CONFIGURE_INPUT),
-                buildToolEvent("evolver_autonomous_start", "ses-auto-status-stale", {}),
-              ].join("\n"),
+              stdout: buildToolEvent("evolver_autonomous_start", "ses-auto-status-stale", {}),
               stderr: "",
               exitCode: 0,
             } satisfies EvalCommandResult
           }
 
-          return {
-            stdout: [
-              buildToolEvent(
+          if (executionCount === 2) {
+            return {
+              stdout: buildToolEvent(
                 "evolver_autonomous_status",
                 "ses-auto-status-stale",
                 {},
@@ -3031,16 +3321,21 @@ describe("evaluation scenarios", () => {
                   ],
                 }),
               ),
-              buildToolEvent("evolver_status", "ses-auto-status-stale", {}, JSON.stringify({
-                skills: {},
-                agents: {},
-                commands: {},
-                memories: {},
-                quarantine: {},
-                currentRevision: null,
-                pendingRevision: "rev-pending-status-stale",
-              })),
-            ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: buildToolEvent("evolver_status", "ses-auto-status-stale", {}, JSON.stringify({
+              skills: {},
+              agents: {},
+              commands: {},
+              memories: {},
+              quarantine: {},
+              currentRevision: null,
+              pendingRevision: "rev-pending-status-stale",
+            })),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -3055,20 +3350,24 @@ describe("evaluation scenarios", () => {
       await readFile(new URL("../../eval/scenarios/autonomous-startup.md", import.meta.url), "utf8"),
     )
 
+    let executionCount = 0
+
     await expect(
       runEvaluationScenario({
         repoRoot,
         scenarioName: "autonomous-startup",
         timestamp: "2026-04-30T14-34-15.000Z",
         executeCommand: async ({ workspaceRoot }) => {
-          await writeFile(
-            join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
-            JSON.stringify({ action: "autonomous_restore", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }) + "\n",
-          )
+          executionCount += 1
 
-          return {
-            stdout: [
-              buildToolEvent(
+          if (executionCount === 1) {
+            await writeFile(
+              join(workspaceRoot, ".opencode/oc-evolver/audit.ndjson"),
+              JSON.stringify({ action: "autonomous_restore", status: "success", target: ".opencode/oc-evolver/autonomous-loop.json" }) + "\n",
+            )
+
+            return {
+              stdout: buildToolEvent(
                 "evolver_autonomous_status",
                 "ses-autonomous-startup-status-stale",
                 {},
@@ -3082,16 +3381,21 @@ describe("evaluation scenarios", () => {
                   },
                 }),
               ),
-              buildToolEvent("evolver_status", "ses-autonomous-startup-status-stale", {}, JSON.stringify({
-                skills: {},
-                agents: {},
-                commands: {},
-                memories: {},
-                quarantine: {},
-                currentRevision: "rev-unexpected-startup",
-                pendingRevision: "rev-pending-startup",
-              })),
-            ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            } satisfies EvalCommandResult
+          }
+
+          return {
+            stdout: buildToolEvent("evolver_status", "ses-autonomous-startup-status-stale", {}, JSON.stringify({
+              skills: {},
+              agents: {},
+              commands: {},
+              memories: {},
+              quarantine: {},
+              currentRevision: "rev-unexpected-startup",
+              pendingRevision: "rev-pending-startup",
+            })),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -3105,6 +3409,8 @@ describe("evaluation scenarios", () => {
       join(repoRoot, "eval/scenarios/autonomous-preview.md"),
       await readFile(new URL("../../eval/scenarios/autonomous-preview.md", import.meta.url), "utf8"),
     )
+
+    let executionCount = 0
 
     const result = await runEvaluationScenario({
       repoRoot,
@@ -3131,30 +3437,23 @@ describe("evaluation scenarios", () => {
         } as never)
         const tool = hooks.tool!
 
-        const previewOutput = await tool.evolver_autonomous_preview!.execute(
-          {},
-          { sessionID: "ses-autonomous-preview" } as never,
-        )
-        const statusOutput = await tool.evolver_autonomous_status!.execute(
-          {},
-          { sessionID: "ses-autonomous-preview" } as never,
-        )
+        executionCount += 1
 
         return {
-          stdout: [
-            buildToolEvent(
-              "evolver_autonomous_preview",
-              "ses-autonomous-preview",
-              {},
-              previewOutput,
-            ),
-            buildToolEvent(
-              "evolver_autonomous_status",
-              "ses-autonomous-preview",
-              {},
-              statusOutput,
-            ),
-          ].join("\n"),
+          stdout:
+            executionCount === 1
+              ? buildToolEvent(
+                  "evolver_autonomous_preview",
+                  "ses-autonomous-preview",
+                  {},
+                  await tool.evolver_autonomous_preview!.execute({}, { sessionID: "ses-autonomous-preview" } as never),
+                )
+              : buildToolEvent(
+                  "evolver_autonomous_status",
+                  "ses-autonomous-preview",
+                  {},
+                  await tool.evolver_autonomous_status!.execute({}, { sessionID: "ses-autonomous-preview" } as never),
+                ),
           stderr: "",
           exitCode: 0,
         } satisfies EvalCommandResult
@@ -3166,7 +3465,7 @@ describe("evaluation scenarios", () => {
       turnCount: number
     }
 
-    expect(resultJson.turnCount).toBe(1)
+    expect(resultJson.turnCount).toBe(2)
     expect(resultJson.changedFiles).toEqual([".opencode/oc-evolver/autonomous-loop.json"])
   })
 
@@ -3176,60 +3475,64 @@ describe("evaluation scenarios", () => {
       await readFile(new URL("../../eval/scenarios/autonomous-preview.md", import.meta.url), "utf8"),
     )
 
+    let executionCount = 0
+
     await expect(
       runEvaluationScenario({
         repoRoot,
         scenarioName: "autonomous-preview",
         timestamp: "2026-05-01T10-00-30.000Z",
         executeCommand: async () => {
+          executionCount += 1
+
           return {
-            stdout: [
-              buildToolEvent(
-                "evolver_autonomous_preview",
-                "ses-autonomous-preview-stale",
-                {},
-                JSON.stringify({
-                  wouldRun: false,
-                  wouldSkipReason: "no bounded objective available",
-                  selectedObjective: null,
-                  selectedObjectiveSource: null,
-                  selectedObjectiveRationale: null,
-                  mutationPrompt: null,
-                  verificationCommands: [],
-                  evaluationScenarios: [],
-                  config: {
-                    enabled: false,
-                    paused: true,
-                    intervalMs: 0,
-                  },
-                  lockHeld: false,
-                  runtimeContractCompatible: true,
-                  runtimeContractDetail: null,
-                  pendingObjectives: [],
-                }),
-              ),
-              buildToolEvent(
-                "evolver_autonomous_status",
-                "ses-autonomous-preview-stale",
-                {},
-                JSON.stringify({
-                  config: {
-                    enabled: true,
-                    paused: false,
-                    intervalMs: 60_000,
-                    verificationCommands: [["bun", "run", "typecheck"]],
-                    evaluationScenarios: ["smoke"],
-                  },
-                  objectives: [
-                    {
-                      prompt: AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT,
-                      status: "pending",
-                    },
-                  ],
-                  iterations: [],
-                }),
-              ),
-            ].join("\n"),
+            stdout:
+              executionCount === 1
+                ? buildToolEvent(
+                    "evolver_autonomous_preview",
+                    "ses-autonomous-preview-stale",
+                    {},
+                    JSON.stringify({
+                      wouldRun: false,
+                      wouldSkipReason: "no bounded objective available",
+                      selectedObjective: null,
+                      selectedObjectiveSource: null,
+                      selectedObjectiveRationale: null,
+                      mutationPrompt: null,
+                      verificationCommands: [],
+                      evaluationScenarios: [],
+                      config: {
+                        enabled: false,
+                        paused: true,
+                        intervalMs: 0,
+                      },
+                      lockHeld: false,
+                      runtimeContractCompatible: true,
+                      runtimeContractDetail: null,
+                      pendingObjectives: [],
+                    }),
+                  )
+                : buildToolEvent(
+                    "evolver_autonomous_status",
+                    "ses-autonomous-preview-stale",
+                    {},
+                    JSON.stringify({
+                      config: {
+                        enabled: true,
+                        paused: false,
+                        intervalMs: 0,
+                        verificationCommands: [["bun", "run", "typecheck"]],
+                        evaluationScenarios: ["smoke"],
+                      },
+                      objectives: [
+                        {
+                          prompt: AUTONOMOUS_PREVIEW_OBJECTIVE_PROMPT,
+                          status: "pending",
+                        },
+                      ],
+                      iterations: [],
+                    }),
+                  ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -3243,6 +3546,8 @@ describe("evaluation scenarios", () => {
       join(repoRoot, "eval/scenarios/autonomous-metrics.md"),
       await readFile(new URL("../../eval/scenarios/autonomous-metrics.md", import.meta.url), "utf8"),
     )
+
+    let executionCount = 0
 
     const result = await runEvaluationScenario({
       repoRoot,
@@ -3269,30 +3574,23 @@ describe("evaluation scenarios", () => {
         } as never)
         const tool = hooks.tool!
 
-        const metricsOutput = await tool.evolver_autonomous_metrics!.execute(
-          {},
-          { sessionID: "ses-autonomous-metrics" } as never,
-        )
-        const statusOutput = await tool.evolver_autonomous_status!.execute(
-          {},
-          { sessionID: "ses-autonomous-metrics" } as never,
-        )
+        executionCount += 1
 
         return {
-          stdout: [
-            buildToolEvent(
-              "evolver_autonomous_metrics",
-              "ses-autonomous-metrics",
-              {},
-              metricsOutput,
-            ),
-            buildToolEvent(
-              "evolver_autonomous_status",
-              "ses-autonomous-metrics",
-              {},
-              statusOutput,
-            ),
-          ].join("\n"),
+          stdout:
+            executionCount === 1
+              ? buildToolEvent(
+                  "evolver_autonomous_metrics",
+                  "ses-autonomous-metrics",
+                  {},
+                  await tool.evolver_autonomous_metrics!.execute({}, { sessionID: "ses-autonomous-metrics" } as never),
+                )
+              : buildToolEvent(
+                  "evolver_autonomous_status",
+                  "ses-autonomous-metrics",
+                  {},
+                  await tool.evolver_autonomous_status!.execute({}, { sessionID: "ses-autonomous-metrics" } as never),
+                ),
           stderr: "",
           exitCode: 0,
         } satisfies EvalCommandResult
@@ -3304,7 +3602,7 @@ describe("evaluation scenarios", () => {
       turnCount: number
     }
 
-    expect(resultJson.turnCount).toBe(1)
+    expect(resultJson.turnCount).toBe(2)
     expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/autonomous-loop.json")
     expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/registry.json")
   })
@@ -3315,55 +3613,59 @@ describe("evaluation scenarios", () => {
       await readFile(new URL("../../eval/scenarios/autonomous-metrics.md", import.meta.url), "utf8"),
     )
 
+    let executionCount = 0
+
     await expect(
       runEvaluationScenario({
         repoRoot,
         scenarioName: "autonomous-metrics",
         timestamp: "2026-05-01T10-01-30.000Z",
         executeCommand: async () => {
+          executionCount += 1
+
           return {
-            stdout: [
-              buildToolEvent(
-                "evolver_autonomous_metrics",
-                "ses-autonomous-metrics-stale",
-                {},
-                JSON.stringify({
-                  totalIterations: 0,
-                  promotedCount: 0,
-                  rejectedCount: 0,
-                  rolledBackCount: 0,
-                  skippedCount: 0,
-                  mutationFailedCount: 0,
-                  noPendingRevisionCount: 0,
-                  promotionRate: 0,
-                  avgIterationDurationMs: 0,
-                  lastIterationDurationMs: null,
-                  objectivesCompleted: 0,
-                  objectivesPending: 0,
-                  objectivesQuarantined: 0,
-                  latestIteration: null,
-                  since: new Date(0).toISOString(),
-                }),
-              ),
-              buildToolEvent(
-                "evolver_autonomous_status",
-                "ses-autonomous-metrics-stale",
-                {},
-                JSON.stringify({
-                  objectives: [
-                    { prompt: "Completed objective", status: "completed" },
-                    { prompt: "Pending objective", status: "pending" },
-                    { prompt: "Quarantined objective", status: "quarantined" },
-                  ],
-                  iterations: [
-                    { decision: "promoted" },
-                    { decision: "rejected" },
-                    { decision: "skipped_unrunnable" },
-                    { decision: "rolled_back" },
-                  ],
-                }),
-              ),
-            ].join("\n"),
+            stdout:
+              executionCount === 1
+                ? buildToolEvent(
+                    "evolver_autonomous_metrics",
+                    "ses-autonomous-metrics-stale",
+                    {},
+                    JSON.stringify({
+                      totalIterations: 0,
+                      promotedCount: 0,
+                      rejectedCount: 0,
+                      rolledBackCount: 0,
+                      skippedCount: 0,
+                      mutationFailedCount: 0,
+                      noPendingRevisionCount: 0,
+                      promotionRate: 0,
+                      avgIterationDurationMs: 0,
+                      lastIterationDurationMs: null,
+                      objectivesCompleted: 0,
+                      objectivesPending: 0,
+                      objectivesQuarantined: 0,
+                      latestIteration: null,
+                      since: new Date(0).toISOString(),
+                    }),
+                  )
+                : buildToolEvent(
+                    "evolver_autonomous_status",
+                    "ses-autonomous-metrics-stale",
+                    {},
+                    JSON.stringify({
+                      objectives: [
+                        { prompt: "Completed objective", status: "completed" },
+                        { prompt: "Pending objective", status: "pending" },
+                        { prompt: "Quarantined objective", status: "quarantined" },
+                      ],
+                      iterations: [
+                        { decision: "promoted" },
+                        { decision: "rejected" },
+                        { decision: "skipped_unrunnable" },
+                        { decision: "rolled_back" },
+                      ],
+                    }),
+                  ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult
@@ -3377,6 +3679,8 @@ describe("evaluation scenarios", () => {
       join(repoRoot, "eval/scenarios/autonomous-stop.md"),
       await readFile(new URL("../../eval/scenarios/autonomous-stop.md", import.meta.url), "utf8"),
     )
+
+    let executionCount = 0
 
     const result = await runEvaluationScenario({
       repoRoot,
@@ -3403,25 +3707,23 @@ describe("evaluation scenarios", () => {
         } as never)
         const tool = hooks.tool!
 
-        const stopOutput = await tool.evolver_autonomous_stop!.execute(
-          {},
-          { sessionID: "ses-autonomous-stop" } as never,
-        )
-        const statusOutput = await tool.evolver_autonomous_status!.execute(
-          {},
-          { sessionID: "ses-autonomous-stop" } as never,
-        )
+        executionCount += 1
 
         return {
-          stdout: [
-            buildToolEvent("evolver_autonomous_stop", "ses-autonomous-stop", {}, stopOutput),
-            buildToolEvent(
-              "evolver_autonomous_status",
-              "ses-autonomous-stop",
-              {},
-              statusOutput,
-            ),
-          ].join("\n"),
+          stdout:
+            executionCount === 1
+              ? buildToolEvent(
+                  "evolver_autonomous_stop",
+                  "ses-autonomous-stop",
+                  {},
+                  await tool.evolver_autonomous_stop!.execute({}, { sessionID: "ses-autonomous-stop" } as never),
+                )
+              : buildToolEvent(
+                  "evolver_autonomous_status",
+                  "ses-autonomous-stop",
+                  {},
+                  await tool.evolver_autonomous_status!.execute({}, { sessionID: "ses-autonomous-stop" } as never),
+                ),
           stderr: "",
           exitCode: 0,
         } satisfies EvalCommandResult
@@ -3433,7 +3735,7 @@ describe("evaluation scenarios", () => {
       turnCount: number
     }
 
-    expect(resultJson.turnCount).toBe(1)
+    expect(resultJson.turnCount).toBe(2)
     expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/autonomous-loop.json")
     expect(resultJson.changedFiles).toContain(".opencode/oc-evolver/audit.ndjson")
   })
@@ -3444,46 +3746,50 @@ describe("evaluation scenarios", () => {
       await readFile(new URL("../../eval/scenarios/autonomous-stop.md", import.meta.url), "utf8"),
     )
 
+    let executionCount = 0
+
     await expect(
       runEvaluationScenario({
         repoRoot,
         scenarioName: "autonomous-stop",
         timestamp: "2026-05-01T10-02-30.000Z",
         executeCommand: async () => {
+          executionCount += 1
+
           return {
-            stdout: [
-              buildToolEvent(
-                "evolver_autonomous_stop",
-                "ses-autonomous-stop-stale",
-                {},
-                JSON.stringify({
-                  config: {
-                    enabled: true,
-                    paused: false,
-                    intervalMs: 60_000,
-                  },
-                  activation: {
-                    mode: "worker",
-                  },
-                }),
-              ),
-              buildToolEvent(
-                "evolver_autonomous_status",
-                "ses-autonomous-stop-stale",
-                {},
-                JSON.stringify({
-                  config: {
-                    enabled: true,
-                    paused: false,
-                    intervalMs: 60_000,
-                    verificationCommands: [["bun", "run", "typecheck"]],
-                    evaluationScenarios: ["smoke"],
-                  },
-                  objectives: [],
-                  iterations: [],
-                }),
-              ),
-            ].join("\n"),
+            stdout:
+              executionCount === 1
+                ? buildToolEvent(
+                    "evolver_autonomous_stop",
+                    "ses-autonomous-stop-stale",
+                    {},
+                    JSON.stringify({
+                      config: {
+                        enabled: true,
+                        paused: false,
+                        intervalMs: 0,
+                      },
+                      activation: {
+                        mode: "worker",
+                      },
+                    }),
+                  )
+                : buildToolEvent(
+                    "evolver_autonomous_status",
+                    "ses-autonomous-stop-stale",
+                    {},
+                    JSON.stringify({
+                      config: {
+                        enabled: true,
+                        paused: false,
+                        intervalMs: 0,
+                        verificationCommands: [["bun", "run", "typecheck"]],
+                        evaluationScenarios: ["smoke"],
+                      },
+                      objectives: [],
+                      iterations: [],
+                    }),
+                  ),
             stderr: "",
             exitCode: 0,
           } satisfies EvalCommandResult

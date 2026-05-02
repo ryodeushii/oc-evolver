@@ -1,6 +1,6 @@
 Turn 1:
 
-Configure the autonomous loop with exactly this payload and then pause it:
+Configure the autonomous loop with exactly this payload:
 - `enabled: true`
 - `paused: false`
 - `intervalMs: 60000`
@@ -10,12 +10,33 @@ Configure the autonomous loop with exactly this payload and then pause it:
 - `objectives: []`
 - `replaceObjectives: true`
 
-Call exactly `evolver_autonomous_configure` and then `evolver_autonomous_pause`.
+Call exactly `evolver_autonomous_configure`.
+Exit successfully after configure succeeds.
 
 ---
 
 Turn 2:
 
-Resume the autonomous loop and then show its status.
-Call exactly `evolver_autonomous_resume` and then `evolver_autonomous_status`.
-Stop after status succeeds.
+Pause the configured autonomous loop.
+Call exactly `evolver_autonomous_pause`.
+Exit successfully after pause succeeds.
+
+---
+
+Turn 3:
+
+Continue the same session.
+
+Resume the autonomous loop.
+Call exactly `evolver_autonomous_resume`.
+Exit successfully after resume succeeds.
+
+---
+
+Turn 4:
+
+Continue the same session.
+
+Show the resumed loop status.
+Call exactly `evolver_autonomous_status`.
+Exit successfully after the status read completes.

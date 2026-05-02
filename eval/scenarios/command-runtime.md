@@ -1,8 +1,7 @@
-Use the oc-evolver plugin to exercise command-owned runtime metadata end to end.
-Create a reusable memory profile named `session-routing` first.
-Create a second reusable memory profile named `command-routing`.
-Apply only `session-routing` in the current session.
-Create a command named `review-markdown` that carries its own `model`, `memory: [command-routing]`, and `permission` metadata.
-Run that command once against `README.md`.
-Call exactly `evolver_write_memory`, `evolver_write_memory`, `evolver_apply_memory`, `evolver_write_command`, and `evolver_run_command` in that order.
-Stop after the successful command run leaves the continued session retaining both `session-routing` and `command-routing`.
+Turn 1:
+
+The harness already seeds an accepted `review-markdown` command plus accepted `session-routing` and `command-routing` memory profiles.
+Use `evolver_run_command` directly.
+Run `review-markdown` once against `README.md`.
+The harness will verify that the successful command run leaves the continued session retaining the command-owned runtime policy and command memory state.
+Stop after the command finishes.

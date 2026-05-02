@@ -21,6 +21,14 @@ Eval fixtures still use workspace-local `.opencode/*` roots through explicit bri
 
 When the current workspace is the `oc-evolver` source repo itself, the plugin still uses the global OpenCode config root for mutable runtime state. Local development only relaxes protected-path checks so the kernel source can be edited in place.
 
+## Operational model
+
+- The kernel is fixed code.
+- Only mutable runtime artifacts evolve: `skill`, `agent`, `command`, `memory`, and kernel state under the active OpenCode config root.
+- Regular repo-local evals prove behavior through temp fixture workspaces.
+- Installed-mode evals separately prove the published `./server` path through a temp global OpenCode config root.
+- This repo documents and runs manual local verification gates rather than committing GitHub CI workflow runners.
+
 ## Layout
 
 - Kernel plugin entry: `src/oc-evolver.ts`
@@ -41,7 +49,7 @@ The kernel only allows autonomous writes inside these roots relative to the acti
 - `.opencode/commands/`
 - `.opencode/memory/`
 
-The local runtime contract is currently frozen to OpenCode `1.14.29` with native agent directory `agent/`.
+The local runtime contract is currently frozen to OpenCode `1.14.31` with native agent directory `agent/`.
 
 ## Protected paths
 
@@ -96,7 +104,7 @@ The autonomous loop now has plugin-native control-plane tools. `evolver_autonomo
 
 For a closed-loop path, `bun run autonomous:run` drives `opencode run` against the real repo, reuses the last continued session, persists richer loop learning plus iteration history under `.opencode/oc-evolver/autonomous-loop.json`, runs the default verification gates (`bun run typecheck`, `bun run test:unit`), runs the dedicated `autonomous-run` eval by default, and then auto-promotes, auto-rejects, or rolls back a newly accepted revision if post-promotion health regresses. Scheduled runs now use both a worker-local in-flight guard and a durable lock at `.opencode/oc-evolver/autonomous-loop.lock`. That lock now records acquisition metadata and will only be reclaimed automatically when the metadata proves the lock has gone stale; otherwise the next run still returns `skipped_locked`. Pass `--worker` to keep that loop on a Worker-backed 15-minute schedule by default, or override the cadence with `--interval-ms <ms>`.
 
-Commands are executable runtime artifacts rather than write-only markdown. `evolver_run_agent` and `evolver_run_command` now return structured execution records with the composed session response instead of only acknowledging that they ran. Commands can carry their own `memory`, `permission`, and `model` metadata, and after a successful command run `evolver_run_command` composes those command-owned settings with any referenced agent instructions before persisting the resulting runtime policy and merged memory state for the continued session.
+Commands are executable runtime artifacts rather than write-only markdown. `evolver_run_agent` and `evolver_run_command` now return structured execution records with the composed session response instead of only acknowledging that they ran. Commands can carry their own `memory`, `permission`, and `model` metadata, and after a successful command run `evolver_run_command` composes those command-owned settings with any referenced agent instructions before persisting the resulting runtime policy and merged command memory state for the continued session.
 
 Lifecycle cleanup is also plugin-native: `evolver_delete_artifact` stages a deletion into a pending revision and removes the artifact from the working registry state, while `evolver_prune` removes obsolete revision snapshots that are no longer reachable from the accepted or pending revision graph.
 
@@ -248,14 +256,23 @@ Current behavior is fully bounded and evidence-backed: queued manual objectives 
 - Install dependencies: `bun install`
 - Typecheck: `bun run typecheck`
 - Unit tests: `bun run test:unit`
+- Runtime contract check: `bun run scripts/check-runtime-contract.ts`
 - Autonomous loop: `bun run autonomous:run`
+- Core eval tier: `bun run eval:core`
+- Regular eval tier: `bun run eval:pr`
 - Autonomous eval: `bun run eval:autonomous-run`
 - Smoke eval: `bun run eval:smoke`
 - Full eval suite: `bun run eval:all`
+- Installed smoke evals: `bun run eval:installed-smoke`
+- Installed autonomous eval: `bun run eval:installed-autonomous`
+
+The release checklist lives in `docs/release.md`.
 
 ## Evaluation model
 
-The eval harness always runs against a fresh temp workspace cloned from `eval/fixtures/base/`. It never targets the real user config tree.
+- `scripts/run-eval.ts` runs the regular eval tiers against a fresh temp workspace cloned from `eval/fixtures/base/`.
+- `scripts/run-installed-eval.ts` runs installed-mode proofs against a temp `HOME` / global OpenCode config root so the published `./server` entrypoint is exercised the way operators actually install it.
+- Neither harness targets the real user config tree.
 
 Each scenario writes artifacts under `eval/results/<scenario>/<timestamp>/`, including:
 

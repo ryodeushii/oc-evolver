@@ -17,18 +17,23 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test:unit": "bun test",
+    "test:unit": "bun test tests/unit",
+    "test:integration": "bun test tests/integration",
     "autonomous:run": "bun run scripts/run-autonomous-loop.ts",
     "eval:autonomous-run": "bun run scripts/run-eval.ts autonomous-run",
+    "eval:core": "bun run scripts/run-eval.ts core",
+    "eval:pr": "bun run scripts/run-eval.ts pr",
     "eval:smoke": "bun run scripts/run-eval.ts smoke",
-    "eval:all": "bun run scripts/run-eval.ts all"
+    "eval:all": "bun run scripts/run-eval.ts all",
+    "eval:installed-smoke": "bun run scripts/run-installed-eval.ts smoke policy-deny",
+    "eval:installed-autonomous": "bun run scripts/run-installed-eval.ts autonomous-run"
   },
   "overrides": {
     "uuid": "14.0.0"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.14.31",
-    "@opencode-ai/sdk": "^1.14.31",
+    "@opencode-ai/plugin": "1.14.31",
+    "@opencode-ai/sdk": "1.14.31",
     "zod": "4.4.1"
   },
   "devDependencies": {

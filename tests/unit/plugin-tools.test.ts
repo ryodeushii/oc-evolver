@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 
+import runtimeContract from "../../eval/runtime-contract.json"
 import { OCEvolverPlugin, createOCEvolverPlugin } from "../../src/oc-evolver.ts"
 
 describe("plugin tool surface", () => {
@@ -1305,9 +1306,17 @@ Review README.md.
   test("package ships the runtime contract needed by the server entrypoint", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../../package.json", import.meta.url), "utf8"),
-    ) as { files?: string[] }
+    ) as { files?: string[]; dependencies?: Record<string, string> }
 
     expect(packageJson.files).toContain("eval/runtime-contract.json")
+    expect(packageJson.dependencies?.["@opencode-ai/plugin"]).toBe(runtimeContract.opencodeVersion)
+    expect(packageJson.dependencies?.["@opencode-ai/sdk"]).toBe(runtimeContract.opencodeVersion)
+    expect(packageJson.dependencies?.["@opencode-ai/plugin"]).toBe(packageJson.dependencies?.["@opencode-ai/sdk"])
+    expect(runtimeContract.runFlags).toEqual(expect.arrayContaining([
+      "--dangerously-skip-permissions",
+      "--format",
+      "--dir",
+    ]))
   })
 
   test("uses the bridge plugin path for global runtime roots", async () => {
