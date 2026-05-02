@@ -27,6 +27,7 @@ import {
   setAutonomousLoopPaused,
   stopAutonomousLoop,
 } from "./kernel/autonomous-loop.ts"
+import { ensureBundledSkillRegistered } from "./kernel/bundled-skill.ts"
 import { ensureAutonomousPathAllowed } from "./kernel/policy.ts"
 import {
   applyMutationTransaction,
@@ -311,6 +312,7 @@ export function createOCEvolverPlugin(
       })
 
     await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
+    await ensureBundledSkillRegistered({ pluginFilePath, runtimeContract })
 
     return {
       tool: {
@@ -941,6 +943,7 @@ export function createOCEvolverPlugin(
       },
       config: async () => {
         await ensureKernelRuntimePaths(pluginFilePath, runtimeContract)
+        await ensureBundledSkillRegistered({ pluginFilePath, runtimeContract })
 
         const autonomousStatus = await getAutonomousLoopStatus({
           pluginFilePath,

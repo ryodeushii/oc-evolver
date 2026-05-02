@@ -24,6 +24,8 @@ export function buildOperatorGuide() {
     "- Use evolver_rollback to restore the previous accepted revision when a mutation turns out to be wrong.",
     "- Docs, specs, research, architecture notes, and durable knowledge default to Basic Memory unless the user asked for a repository artifact.",
     "- Respect session storage modes: memory-only, artifact-only, memory-and-artifact.",
+    "- The evolver-usage skill is registered in the kernel. Use evolver_apply_skill(\"evolver-usage\") to load the complete artifact schemas, revision lifecycle, and autonomous loop reference.",
+    "- After context compaction, re-apply evolver-usage to restore the full kernel usage reference.",
   ].join("\n")
 }
 
